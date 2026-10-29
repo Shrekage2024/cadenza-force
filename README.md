@@ -5,6 +5,8 @@
 A chord-driven generative MIDI sequencer: a native VST2 plugin for the Akai Force. Pick a key and scale, shape
 chords, bass and melody with a few knobs per page, and Cadenza generates and follows along as you play.
 
+![Cadenza's PLAY page on the Akai Force](docs/screenshot.png)
+
 This repo holds the sequencer engine and the Force plugin's source. Cadenza also has a browser version and an
 iOS app; those are developed separately and aren't part of this repo.
 
