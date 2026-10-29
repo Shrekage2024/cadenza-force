@@ -1,5 +1,7 @@
 # Cadenza
 
+**[cadenzajam.com](https://cadenzajam.com)** — learn more about the plugin and how to use it.
+
 A chord-driven generative MIDI sequencer: a native VST2 plugin for the Akai Force. Pick a key and scale, shape
 chords, bass and melody with a few knobs per page, and Cadenza generates and follows along as you play.
 
