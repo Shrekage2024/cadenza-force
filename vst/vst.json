@@ -1,0 +1,15 @@
+{
+  "name": "Cadenza",
+  "vendor": "Cadenza",
+  "uid": "ChSq",
+  "version": 1000,
+  "so": "cadenza.so",
+  "params": "params.json",
+  "layout": "layout.conf",
+  "art": "html",
+  "cc": false,
+  "nrpn": false,
+  "programs": { "param": "init" },
+  "defines": { "HAS_SONG_POS": 1, "PARAM_TEXT_MAX": 64, "HAS_DISPLAY_REV": 1, "ON_NO_UPDATE_PREFIX": "\"ph_\"", "LIT_UPDATE_ON_TEXT_POLL": 1, "ECHO_GUARD_POLLED_ONLY": 1 },
+  "build": { "root": "..", "sources": ["src/seq_core.c", "src/theory.c", "src/gen.c", "src/melody.c", "src/voicing.c", "src/rhythm.c", "src/bassline.c", "src/melody2.c", "src/jamlib.c", "src/presets.c", "src/engine.c"], "cflags": ["-Isrc"], "cflags_arm": ["-march=armv7ve", "-mfpu=vfpv3-d16"], "libs": ["-lm", "-ldl"] }
+}
