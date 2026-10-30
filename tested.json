@@ -1,0 +1,409 @@
+[
+ {
+  "version": "0.1.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-11"
+ },
+ {
+  "version": "0.2.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-12"
+ },
+ {
+  "version": "0.3.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-12"
+ },
+ {
+  "version": "0.4.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-13"
+ },
+ {
+  "version": "0.5.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-13"
+ },
+ {
+  "version": "0.6.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-13"
+ },
+ {
+  "version": "0.7.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-13"
+ },
+ {
+  "version": "0.8.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-14"
+ },
+ {
+  "version": "0.9.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-14"
+ },
+ {
+  "version": "0.10.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-14"
+ },
+ {
+  "version": "0.11.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-14"
+ },
+ {
+  "version": "0.12.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-14"
+ },
+ {
+  "version": "0.13.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-15"
+ },
+ {
+  "version": "0.14.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-16"
+ },
+ {
+  "version": "0.16.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-16",
+  "includes": "0.15.0 (VST-12: Init preset, melody phrasing)",
+  "checks": [
+   "install: the installed .so matches the package; filmstrip cache cleaned",
+   "a saved project (Vst Plugin Test, D# Dorian) opens as saved, not as Init",
+   "PRESET menu lists Current and Init; Init resets to C major 1-5-6-4 (held chord, bass C2, up-down Arp loop); a quick tap applies it, a long press only highlights",
+   "after an edit PRESET reads Current; picking Init again resets again",
+   "MELODY RECIPE: Form/Breath/Cadence/Fill rows; 1 + 1 and Q & A update the bar roles and the hint",
+   "MELODY FIX by bar: strip, NEW BAR (bar 3 its own, new up-down line on Am), summary",
+   "BASS FIX by bar: NEW BAR changes Init's Root bass (A3, then the 5th E3); a fixed note marks the bar; RESET BAR back to the phrase; UNDO restores",
+   "playback: position advances and loops over 4 bars",
+   "save: .bv (bass bar 3 = 2, melody bar 3 = 1), the lock and .mp=0,0,0,0 in the project's state",
+   "full reboot: the project reopens with both bars their own and the fixed note",
+   "soak: RSS +4 MB in 10 min, filmstrips unchanged, no new errors; UI thread 22.3% (FOLLOW off) / 34.7% (FOLLOW on) on MELODY FIX",
+   "bench: p99 32.4%, worst block 49.9%; budget OK (skin 51.0/52 MB)"
+  ]
+ },
+ {
+  "version": "0.16.1",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-16",
+  "includes": "FOLLOW on GLOBAL only, on by default, saved as fo=0 when off; bar picks keep FOLLOW",
+  "checks": [
+   "install: the installed .so matches the package; filmstrip cache cleaned",
+   "PLAY: no FOLLOW cell, BARS label; GLOBAL: FOLLOW cell (lit) beside NEW IDEA and its CPU note, in full",
+   "CHORDS FIX and BASS FIX: no FOLLOW cell; UNDO and DONE where they were",
+   "playing, FOLLOW on: the bar strip and grid follow the playing bar; a bar tap picks it (view Bar 3) and FOLLOW stays lit",
+   "FOLLOW off on GLOBAL while playing: a bar tap shows bar 4 while bar 2 plays (playhead dark)",
+   "save with FOLLOW off: fo=0 in the project's plugin state",
+   "full reboot: the project reopens with FOLLOW off; turned on and saved again",
+   "UI thread, PLAY open, playing at 120 BPM: 29.8% FOLLOW on vs 21.0% FOLLOW off (2 min each; no RSS growth, no log errors)",
+   "bench: p99 32.5%, worst block 49.6%; budget OK (skin 50.8/52 MB)"
+  ]
+ },
+ {
+  "version": "0.17.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-17",
+  "includes": "the CHORDS page (VST-15) in place of CHORDS IDEAS and SHAPE: chord strip with drift colours, 8 knobs around the centre chord, chord picker, PROGRESSIONS and VOICING browsers (52 styles), FOLLOW pauses, KEYS",
+  "checks": [
+   "install: the installed .so matches the package; filmstrip cache cleaned",
+   "CHORDS page on an old project: strip, knob ring, left panel and keyboard drawn; blank cells not tinted; locked chords marked",
+   "playing, FOLLOW on (stream at ~10 fps): the strip pages with playback; the lit cell, centre chord and lit keys change on the same frame; the borrowed bVI cell is yellow",
+   "picker while playing: FOLLOW PAUSED, strip and centre held, only the bar counter moves; a pick (vi) locks and shows UNLOCK, keys show the picked chord; CANCEL restores F IV unlocked; bVII + sus4 then DONE keeps A#sus4 (orange, tense 42)",
+   "paging: > holds bar 2 with FOLLOW PAUSED and BACK TO PLAYING; the centre keeps the chord shown at the tap; BACK TO PLAYING resumes",
+   "PROGRESSIONS browser opens from the field tap; Pop applies to unlocked slots, CANCEL restores Classic with the locks; Canon (8) title fits",
+   "VOICING browser opens from the field tap; Trap > Trap Low applies (SPREAD Split, keys an octave down), DONE keeps it",
+   "on-screen knobs: COLOUR 13th (Fmaj13, G13, Cmaj13, tense 50; the locked triad stays a triad; VOICING (edited)); INVERSION -2, SPREAD Cluster, STRUM Up 31 ms (dissonant 76); RESET KNOBS back to Triad/Root/Close/Block",
+   "RHYTHM shows 0.16's rhythm cells; FIX unchanged, with the strip, left panel and keyboard hidden",
+   "UNDO after RESET KNOBS takes back the Trap Low pick (knobs and RESET KNOBS have no undo step, by plan)",
+   "keyboard taps (white, black, edge) change nothing",
+   "save, full reboot, reopen: PLAY and CHORDS pixel-identical (Trap Low edited, COLOUR 13th, locked A#sus4)",
+   "UI thread playing at 120 BPM: CHORDS page 49.1% FOLLOW on (48.2% with 1-bar chords), 35.0% FOLLOW off, closed 20.2% (CLIP view); stopped 2.4%; no RSS or filmstrip growth, no new log errors",
+   "bench: p99 34.7% / 35.3% (two runs), worst block 63.0%; worst single tap 871 us (New Progression); budget OK after the owner's raises (p99 36, UI thread 30, skin 55.6/56 MB)",
+   "not run on the device: Q-Link hardware knobs (the remote addin has no encoders); a 10-minute soak (MPC stops at its 128-bar sequence end)"
+  ]
+ },
+ {
+  "version": "0.17.1",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-17",
+  "includes": "VOICING genre chip plays its genre's first voicing; RESET KNOBS resets all 8 Chords knobs (style's own + new-instance defaults), one undo step",
+  "checks": [
+   "install: the installed .so matches the package; filmstrip cache cleaned",
+   "VOICING browser: tapping only the Techno chip applies Dub Techno (field, title, strip chords to 7ths, first tile lit)",
+   "RESET KNOBS after COMPLEXITY, COLOUR 13th and GATE 20%: COLOUR back to Dub Techno's 7th ('(edited)' clears), GATE 100%, PUSH On the beat, COMPLEXITY moved back",
+   "one UNDO brings all of it back (13th, Gate 20%, Ahead 1/256, Dub Techno (edited))",
+   "bench: p99 35.2%, worst block 60.5%; budget OK"
+  ]
+ },
+ {
+  "version": "0.18.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-18",
+  "includes": "the CHORDS tab's RHYTHM page: every bar its own 16 steps, bar editor (paints, COPY TO ALL, COPY TO…, LOCK, CANCEL/DONE), RHYTHMS browser (24 rhythms, 6 feels), knobs 2-5 follow the mode (SYNC, GHOSTS, HUMANIZE, FILL on RHYTHM) on the physical knobs with their names, COMPLEXITY layer table, CHORDS knobs in reading order, press latch on image buttons",
+  "checks": [
+   "install: the installed .so matches the package; filmstrip cache cleaned",
+   "old project (saved by 0.17): Chords steps load as drawn bars; its saved Q-Link map showed 0.17's knob names until removed (owner approved); later tests in a new unsaved project",
+   "physical knobs: PLAY and CHORDS correct, RHYTHM shows SYNC/GHOSTS/HUMANIZE/FILL, names change with the mode (owner verified)",
+   "bar editor: paint, COPY TO ALL, COPY TO… picker, LOCK/UNLOCK act once per tap (press latch, tap log), CANCEL restores, DONE keeps",
+   "RHYTHMS browser: opens with FOLLOW PAUSED and the current rhythm lit; a tile (Charleston) applies to every unlocked bar; CANCEL restores Neo-soul",
+   "while playing: tapping the playing bar opens it (EDITING, FOLLOW paused) and the counter keeps moving; CANCEL closes it",
+   "readouts while playing: counter, title, strip and KEYS agree offline at every block (0.17.1 the same); screenshots that disagreed were torn mid-redraw",
+   "save, reload and Force restart: bar 2's lock persisted",
+   "soak 10 min, RHYTHM open, playing, 1-bar chords: MPC main thread 39.4-40.3% for the first 6.5 min, RSS and filmstrips flat (then the owner used the Force)",
+   "bench: p99 37.1%, worst block 57.7%; budget OK (skin 62, p99 40, ui_thread 35, owner approved)"
+  ]
+ },
+ {
+  "version": "0.19.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-19",
+  "includes": "the BASS tab's BASS page (strip with tension words, STYLE with 48 styles and the STYLE browser, PEDAL OFF/TONIC/DOMINANT, OCTAVE, RESET KNOBS, 8 knobs in a ring, centre line/notes/tension, KEYS) and bar editor (piano note fixes, OCTAVE 1-4, NEW BAR, RESET BAR, LOCK, CANCEL/DONE, EDIT THIS BAR'S RHYTHM), and the BASS RHYTHM page (per-bar steps with the notes they play, paints, COPY TO ALL, COPY TO…, LOCK, RHYTHMS browser 6 feels x 4, SYNC/GHOSTS/HUMANIZE/FILL); IDEAS/SHAPE/FIX A NOTE removed from BASS",
+  "checks": [
+   "install: the installed .so matches the package (md5 ea0d9d69…); filmstrip cache cleaned after the test",
+   "fresh project CS Test 0-19-0 (MPC's keyboard has no '.'), sequence loop off, 16-bar clip, 160 BPM, 8-bar plugin loop; left on the Force for a follow-up",
+   "BASS page while playing: counter, FOLLOW ON, strip pages 1-4 -> 5-8, centre and KEYS change once a bar",
+   "STYLE < > and the STYLE browser (12 chips, 4 two-line tiles legible, a tile and a chip apply at once, CANCEL restores, DONE keeps); PEDAL TONIC/DOMINANT (P line, MOVEMENT/APPROACH 'held by PEDAL', tension 42 for C over G) and OFF; OCTAVE -1/0/+1",
+   "on-screen knobs 1-8 (dragged through the remote addin) change their texts, the line and notes, '(edited)'; RESET KNOBS is one UNDO step; physical knobs verified by the owner (2026-10-19)",
+   "bar editor while playing: FOLLOW paused, counter keeps moving; a piano key fixes the selected step once per touch (one UNDO undoes it); OCTAVE re-fixes; NEW BAR, RESET BAR, LOCK, CANCEL restores, DONE keeps; EDIT THIS BAR'S RHYTHM opens RHYTHM on that bar; the open bar is not outlined on the strip",
+   "BASS RHYTHM: notes under hits, +/cut with COMPLEXITY, paints HIT/ACCENT/GHOST/HOLD/REST once per tap, COPY TO ALL, COPY TO… picker (cancel, pick 1 bar), LOCK, CANCEL restores incl. copies, RHYTHMS browser CANCEL/DONE, RESET KNOBS",
+   "CHORDS tab, its picker and RHYTHM page unchanged (quick look)",
+   "save, reload and a full Force restart: style, bar 2 own line + lock + fixed A3, bar 3 rhythm lock, painted and copied rhythms persisted (screens pixel-identical before/after restart)",
+   "UI cost at 160 BPM: BASS page open, FOLLOW on 49.1% vs CLIP view 25.6% MPC main thread, +23.5 points (budget 35)",
+   "soak 10 min, BASS page open, FOLLOW on, playing at 160 BPM (restarted at the sequence end): MPC main thread 49.4% avg, RSS and filmstrips flat, no errors logged",
+   "bench: p99 31.3%, worst block 71.0%; setcost worst 721 us (CHORDS New Progression), every new Bass setter under 605 us; budget OK (skin 71, p99 40, ui_thread 35; skin raise owner approved)"
+  ]
+ },
+ {
+  "version": "0.19.1",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-20",
+  "includes": "follow-ups to 0.19.0: the open bar lights on the strip (BASS bar editor, BASS RHYTHM bar, CHORDS RHYTHM bar, CHORDS picker), LOCKED outranks the tension word in a BASS strip cell, message lines fade after 4 s, off-page BASS/RHYTHM cells stay still, paging pause keeps the centre (ruling), engine refactors under the parity hash",
+  "checks": [
+   "install: the installed .so matches the package (md5 6dcbcdbb...); filmstrip cache cleaned after the test",
+   "fresh project CS Test 0-19-1 (CS Test 0-19-0 deleted), sequence loop off, 16-bar clip, 160 BPM, 8-bar plugin loop; left on the Force",
+   "open bar lit, playing bar not, counter on the playing bar: BASS bar editor, BASS RHYTHM bar, CHORDS RHYTHM bar, CHORDS picker (strip brightness 96 vs 73); nothing open: the playing bar lights",
+   "a locked bar with a tension word reads '7 · LOCKED' (was '7 · warm · Am'); kept through save, reload and restart",
+   "message lines blank about 4 s after an action on BASS, BASS RHYTHM and CHORDS RHYTHM, playing and stopped",
+   "BASS paging while playing: FOLLOW paused, centre and KEYS stay on the bar shown at the pause (as CHORDS), BACK TO PLAYING resumes",
+   "switching BASS <-> RHYTHM while playing shows the current page, lit bar, centre and step row at once",
+   "regression: STYLE < > and browser (chip, CANCEL), PEDAL, OCTAVE, on-screen knobs, bar editor key fixes once per touch (one UNDO), BASS RHYTHM paints once per tap, COPY TO ALL, RHYTHMS browser DONE/CANCEL; CHORDS page and RHYTHM, MELODY, PLAY, GLOBAL",
+   "save, reload and a full Force restart: ten screens pixel-identical before/after both; plugin chunk byte-identical between saves",
+   "UI cost at 160 BPM: BASS page open, FOLLOW on 50.4% vs CLIP view 25.1% MPC main thread, +25.3 points (budget 35)",
+   "soak 10 min, BASS page open, FOLLOW on, playing at 160 BPM (restarted at the sequence end): MPC main thread 50.6% avg, RSS and filmstrips flat, no errors logged",
+   "README screenshots of every page at 0.19.1 (docs/screenshots/0191-*.png)",
+   "bench: p99 31.1%, worst block 72.3%; setcost worst 728 us (CHORDS New Progression); budget OK (skin 71, p99 40, ui_thread 35)"
+  ]
+ },
+ {
+  "version": "0.20.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-21",
+  "includes": "MELODY redesign (VST-27): JAM page (6 kinds of melody x 5 levels, blocks switch in time at BEAT/BAR/2 BARS/PHRASE), PHRASE page (FORM incl. AAB and SENTENCE, ANSWER ECHO/SHIFT/MIRROR/RHYTHM/TAIL/SWAP with a picker, live step dots in strip and centre, bar editor with REST/HOLD), mode-following knobs (FORM/BREATH/CADENCE/FILL on JAM, ANSWER/STRAY/OCTAVE/REGISTER on PHRASE); PLAY's position and playhead per beat (VST-17 lever 1)",
+  "checks": [
+   "install: the installed .so matches the package (md5 1158af98...); the DOTS probe plugin removed first; filmstrip cache cleaned",
+   "fresh project CS Test 0-20-0 (CS Test 0-19-1 kept), sequence loop off, 16-bar clip, 160 BPM, 16-bar plugin loop; left on the Force",
+   "JAM: 30 blocks show their pictures through see-through tiles, the playing block lit; a tap queues NEXT and takes over at the boundary for SWITCH AT BAR (bar 9 -> 10), 2 BARS (2 -> 3), PHRASE (10 -> 13) and BEAT (within a beat); replace, cancel and stopped switch work",
+   "PHRASE: strip and centre dots change once a bar; FORM/ANSWER taps redraw within 0.4 s; ANSWER PLAYS opens the picker only with SWAP (CANCEL restores, DONE keeps); FORM LOOP knobs read NO ANSWER, not clipped; paging pauses FOLLOW, BACK TO PLAYING resumes",
+   "bar editor: piano fix (E4* 3), REST, HOLD, OCTAVE 3-7 (66x64 cells), NEW BAR, LOCK, CANCEL, DONE; its dots update",
+   "on-screen knobs follow the JAM/PHRASE mode; physical Q-Links not testable through the remote addin (the project's Q-Link map is cx_3, k_j2..k_j5, jpush, mgat, jdyn as the skin intends) -- owner to check by hand",
+   "save, reload and a full Force restart: JAM and PHRASE pixel-identical; plugin state 503 bytes",
+   "PLAY after VST-17: position reads BAR n.b and the 4 cells of the playing beat light, once a beat",
+   "UI cost at 160 BPM (same MPC process): closed 13.1%; PHRASE 38.0 (+24.9), JAM 17.1 (+4.0), BASS 16.6 (+3.5), PLAY 16.0 (+2.9); budget 35. Before VST-17: PHRASE +55.1",
+   "soak 10 min, PHRASE open, playing: MPC main thread 41.4% avg (+28.3), RSS and filmstrips flat, no plugin errors (one libinput touchscreen-lag warning)",
+   "bench: p99 34.4%, worst block 47.3% (0.19.1: 31.1 / 72.3); setcost: MELODY setters worst 274 us (phrase knob, 16 bars, block queued); slowest overall still 0.17 CHORDS cells (~718 us)",
+   "budget: skin 72.6/73 MB (owner-approved raise), binary 477/512 KB, screen updates 73.5/80 (owner-approved raise), ui_thread +24.9/35",
+   "noted for follow-up: on-screen COMPLEXITY drag is touchy (~2 px a level); MENU > NEW PROJECT restarts MPC (MPC itself, also without Chord Seq)"
+  ]
+ },
+ {
+  "version": "0.21.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-21",
+  "includes": "MELODY knobs (VST-28): every JAM knob acts on every bar - 1 COMPLEXITY, 2 DENSITY (SPARSE/THIN/AS DRAWN/FILLED/BUSY), 3 RANGE (NARROW/AS DRAWN/WIDE/HUGE), 4 REGISTER (moved from PHRASE), 5 VARIATION (OFF/BAR 4/BARS 2+4/ALL), 6 SWING (8th/16th grid, 50-70%), 7 GATE, 8 TIME (HALF/NORMAL/DOUBLE, Amendment 1: replaces ACCENT); weak texts when the playing melody gives a knob nothing to do; PHRASE knobs 2 ANSWER, 3 STRAY, 4 OCTAVE, 5 CADENCE, 6 BREATH, 7 FILL, 8 PUSH",
+  "checks": [
+   "install: the installed .so matches the package (md5 e01dc3df...), build 5abc7c1; filmstrip cache cleaned; replaces the first 0.21.0 build (with ACCENT)",
+   "fresh project CS Test 0-21-0 (CS Test 0-19-1 deleted first, CS Test 0-20-0 kept): Chord Seq on Plugin 001 with a 16-bar clip, Plugin 002/003/004 (Hype) take Chord Seq MIDI Out on ch 3/1/2 (melody/chords/bass), sequence 512 bars loop off, 160 BPM, 16-bar plugin loop; left on the Force for the owner",
+   "JAM: the 8 knob titles read 1 COMPLEXITY, 2 DENSITY, 3 RANGE, 4 REGISTER, 5 VARIATION, 6 SWING, 7 GATE, 8 TIME; 1 COMPLEXITY and 2 DENSITY don't overlap (about one space apart)",
+   "JAM knobs while playing, value text checked on screen and the notes captured from the Chord Seq ALSA port (arecordmidi): DENSITY THIN 10 notes in 2.3 bars vs 21 (quarters), SPARSE 5 (half notes), FILLED and BUSY 16ths (BUSY = FILLED twice, same on an 8th ARP); RANGE NARROW scale steps, WIDE fifths, HUGE leaps to F6; REGISTER LOW down to G2, HIGH up to F6; VARIATION BAR 4 changes only bar 4 (mirrored), BARS 2+4 bars 2 and 4, ALL bars 2-4 (bar by bar against the chord track); SWING 8TH 50/54/58/62/66/70% (70%: off-8ths at 2.8 sixteenths), 16TH 58% with DENSITY FILLED; GATE 20%..200% (note lengths 0.30 / 1.89 / 3.90 sixteenths at 20/100/200%); TIME HALF quarters of 4 sixteenths, DOUBLE the bar's pattern twice in 16ths; every change heard by the next capture (under a second); the bar readout and KEYS follow the playing bar",
+   "weak text: PEDAL HOLD 5 with DENSITY THIN reads THIN · WEAK and 'DENSITY THIN: the melody has almost nothing to thin'; the pedal note is unchanged (G4 held); with THIN + TIME HALF, VARIATION and SWING read BAR 4 · WEAK and 58% · WEAK",
+   "SWITCH AT BEAT (tap cycles BAR, 2 BARS, PHRASE, BEAT): a tap on ARP UP at ~2.2 s cut the pedal and the ARP started at 2.473 s, the next beat (bar at 2.095 s), measured with a tap sent on the device and the MIDI capture on the same clock",
+   "PHRASE: titles 2 ANSWER, 3 STRAY, 4 OCTAVE, 5 CADENCE, 6 BREATH, 7 FILL, 8 PUSH; FORM LOOP knobs read NO ANSWER; FORM 1+1 then each knob turned: ANSWER ECHO/MIRROR/TAIL (the ANSWER cells follow), STRAY LAST BEAT/LAST HALF/ALL, OCTAVE 0/+1, CADENCE HOME/SOFT/OFF, BREATH NONE/1/8/HALF, FILL REST/PICKUP, PUSH ON THE BEAT/AHEAD 1/128/AHEAD 1/64",
+   "on-screen knobs follow the JAM/PHRASE mode: switching shows each mode's own values, nothing changed by the other mode; physical Q-Links not testable through the remote addin: the saved project maps the MELODY tab to cx_3 (119), k_j2..k_j5 (1072-1075), k_j6..k_j8 (1371-1373) -- owner to check the no-jump by hand",
+   "save, reload (browser LOAD) and a full Force restart (reboot, then load): JAM and PHRASE pixel-identical to before the save (stopped); a block tapped after the save (PINKY) came back as the saved ARP UP; plugin state 451 bytes, jy=1210 (THIN, WIDE, BAR 4, HALF: 4 characters)",
+   "UI cost at 160 BPM (same MPC process, after the restart): closed (CLIP view) 13.7%; PHRASE 38.6 (+24.9, 0.20 +24.9); JAM 17.2 (+3.5, 0.20 +4.0); budget 35",
+   "soak 11 min, MELODY JAM open, playing: MPC main thread 17.6% average (+3.9), RSS and filmstrips flat, no plugin errors (one libinput touchscreen-lag warning from the keep-awake touches)",
+   "bench: p99 32.8%, worst block 53.3% (0.20: 34.4 / 47.3), threads 0.0, open 4.2 ms; setcost: JAM setters with DENSITY, RANGE, VARIATION and TIME off neutral and a block queued worst 1043 us (35.9% of a block; k_j3 RANGE and k_j5 VARIATION mean ~905 us, k_j8 TIME worst 912 us); the first 0.21.0 build's 519 us rows were measured on PHRASE (probe fixed to tap JAM first); 0.20 274 us; CHORDS cells still ~690 us",
+   "budget: BUDGET OK -- skin 72.6/73 MB, binary 489/512 KB, p99 32.8/40, worst 53.3/75, ui_thread +24.9/35",
+   "noted for follow-up: JAM setters off neutral cost ~1 ms (36% of a block, the slowest setter in the plugin; not gated by tests/budget.sh); on-screen knob drags step unevenly (a 36 px drag moved RANGE two steps, -14 px nothing on REGISTER) because of qlink_ticks; SWING's weak form drops the grid ('58% · WEAK'); MPC's Select Recent list doesn't show new projects (load CS Test 0-21-0 from the browser: SSD/Projects)"
+  ]
+ },
+ {
+  "version": "0.22.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-23",
+  "includes": "CHORDS and BASS JAM pages (VST-29): a 6 x 5 block grid on each tab (HOUSE, TECHNO, TRANCE, POP, ROCK, DISCO x 5 levels; a block sets notes and rhythm together), blocks switch in time at the lane's own SWITCH AT (BEAT/BAR/2 BARS/PHRASE), NOW PLAYING + 4 bar cells + SWITCH AT status row, locked bars kept and shown violet with LOCKED (a BASS rhythm-only lock is note-locked by the tap), knobs 1 COMPLEXITY (row), 2 DENSITY, 3 COLOUR/MOVEMENT, 4 SPREAD/OCTAVES, 5 VARIATION, 6 SWING, 7 GATE, 8 TIME with weak texts; tabs open on JAM; CHORDS/BASS Q-Links on fixed slots k_s1..k_s6, cgate, k_s8 / k_b1..k_b6, bgate, k_b8",
+  "checks": [
+   "install: the installed .so matches the package (md5 2bd2a10d...), build 074da69 (code 05a1c90 + release commits); filmstrip cache cleaned",
+   "fresh project CS Test 0-22-0 (CS Test 0-20-0 deleted first, CS Test 0-21-0 kept): Chord Seq on Plugin 001 with a 16-bar clip, Plugin 002/003/004 (Hype) take Chord Seq MIDI Out on ch 3/1/2 (melody/chords/bass), sequence 512 bars loop off, 160 BPM, 16-bar plugin loop; no other project file touched by the saves; left on the Force for the owner",
+   "looks: both tabs open on JAM (also after reload and restart); mode cells CHORDS JAM / CHORDS / RHYTHM / FIX / NAMES and BASS JAM / BASS / RHYTHM; status row NOW PLAYING + 4 bar cells + SWITCH AT; the 6 genres; block pictures in lane colour (amber / blue); knob titles CHORDS 1 COMPLEXITY 2 DENSITY 3 COLOUR 4 SPREAD 5 VARIATION 6 SWING 7 GATE 8 TIME, BASS 3 MOVEMENT 4 OCTAVES; pixel-for-pixel the built skin previews; long NEXT labels fit (SUB DRONE NEXT, ROOT HOLD NEXT, FUNK 3RDS NEXT, STRUM 16 NEXT, DUB STAB NEXT); JAM mode cells act on one touch",
+   "taps while playing (MIDI captured from the Chord Seq ALSA port with arecordmidi, taps sent on the device): SWITCH AT BAR - HOUSE OFFBEAT tapped 11.6 sixteenths into a G bar, the old whole chord played to the bar line and the block's offbeat hits started at the next bar line (2.853 s); SWITCH AT PHRASE - TECHNO DUB STAB tapped just after a phrase start took over 4 bars later at the next phrase (bar 1 after bar 16), the old block played on through; BASS SUB DRONE at PHRASE likewise; NEXT shows on the queued block (dashed amber, 'DUB STAB NEXT') and in the line under the grid ('NEXT - TECHNO - DUB STAB - at bar 1' + 'takes over at bar 1'); a second tap replaces; tapping the playing block cancels ('Cancelled: TECHNO - DUB STAB plays on'; capture across the phrase: no switch), on both tabs; stopped: 'switches at once'",
+   "(edited): a VOICING pick on the CHORDS page makes NOW PLAYING read 'DUB STAB (edited)' (the genre is dropped to fit); a tap on that playing-but-edited block with nothing queued re-queues it and the commit clears '(edited)'; one physical touch on it while another block was queued gave exactly one cancel ('Cancelled', no re-queue) - no double set",
+   "locked bars: CHORDS bar 14 painted x.x.....x.x.x... and LOCKED on RHYTHM, then POP PIANO 4S tapped: every other bar quarters, bar 14 kept its 5 hits (it takes the new voicing - per-part voicing, Claude's call) and JAM's bar cell shows violet 'BAR 14 - G / LOCKED'; BASS bar 6 painted A-x-----x-x----- and LOCKED (rhythm only) on BASS RHYTHM, then DISCO OCTAVES tapped: bar 6 kept its rhythm and G1 notes while the others play octave 8ths; the BASS page shows bar 6 'LOCKED: knobs and styles leave this bar alone' (auto note-lock); JAM bar cell violet LOCKED; both locks survive save, reload and restart",
+   "CHORDS JAM knobs by capture: DENSITY SPARSE (1 dyad a bar) / THIN (3 hits) / AS DRAWN (4 quarters) / FILLED (6 hits, 7ths) / BUSY (strummed 9ths, ~10 hits); COLOUR POWER (5ths) / TRIAD / 7TH / 9TH / 11TH / 13TH (2-5 notes); SPREAD CLUSTER / CLOSE / OPEN / SPLIT / WIDE (bass note down to C2/B1); VARIATION BAR 4 (F bar: FILL 16ths + inversion), BARS 2+4 (G bar rotated + inverted too), ALL BARS (bar 3 synced as well; locked bar 14 untouched); SWING 58/66/70% (off-8ths at 2.3/2.6/2.8 sixteenths; the locked bar not swung); GATE 20% (shortest) / 200% (1.9 sixteenths on 8ths); TIME HALF (8ths -> quarters) / DOUBLE (16ths); knob 1 down one level queued POP SYNCO ('POP - SYNCO takes over at bar 7') and its rhythm played",
+   "BASS JAM knobs by capture: DENSITY SPARSE (1 a bar) / THIN (quarters) / AS DRAWN (octave 8ths) / FILLED (14 a bar) / BUSY (16ths); MOVEMENT NONE / A LITTLE (5ths) / SOME / LOTS (3rds, 5ths) / ALL (walks); OCTAVES NONE (roots) / SOME / ALL (octave up); VARIATION BARS 2+4 changes bars 2 and 4 (reads 'weak here' on OCTAVES 2: a few notes change); SWING 58/70% (2.3/2.8); GATE 20%/200%; TIME HALF/DOUBLE; knob 1 down queued DISCO ROOT 8S 1 (root 8ths)",
+   "weak texts: CHORDS PIANO 4S (quarters) SWING 58% reads '58% - WEAK' and 'SWING 58%: almost no off-beat hits to swing'; BASS SUB DRONE SWING '58% - WEAK'; on DRIVE 8S the WEAK goes",
+   "after jamming: the CHORDS page reads COMPLEXITY '3 HITS A BAR'/'5 HITS A BAR' and VOICING 'Custom' for the block, RESET KNOBS works; the CHORDS and BASS RHYTHM pages show the block name in the rhythm field ('RHYTHM - ALL BARS: DUB STAB', 'ROOT HOLD'), '(edited)' for a hand-edited bar; UNDO on the CHORDS page after a JACKIN tap brought back PIANO 4S quarters and its voicing, locked bar 14 kept",
+   "PUSH and DYNAMICS on the CHORDS page: the on-screen knobs are cpush/cdyn (continuous: AHEAD 1/128, 1/64, 1/32; SOFTER -20, ACCENTED +15/+35/+50 seen), not 5-step; the 5 steps live on the Q-Link slots k_s6/k_s8 (XK_PUSH/XK_DYN), not testable through the remote addin - owner to check by hand",
+   "MELODY: JAM page unchanged; ARP UP -> OSTINATO PULSE took over at the next bar line (capture)",
+   "saved Q-Link maps (data.tracks[0].program.customisable.mapping, fresh project and after the final save): CHORDS knobs 1-8 = k_s1 (1374), k_s2 (703), k_s3 (704), k_s4 (705), k_s5 (706), k_s6 (1375), cgate (261), k_s8 (1376); BASS = k_b1 (1377), k_b2..k_b5 (803-806), k_b6 (1378), bgate (343), k_b8 (1379); MELODY as 0.21",
+   "save, reload (browser LOAD; a block tapped after the save came back as the saved one) and a full Force restart (reboot, then load): CHORDS JAM, BASS JAM and MELODY JAM pixel-identical to before the save (stopped); plugin state 560 bytes (A1.dj=3,3,... POP SYNCO; A2.dj=1,0,... TECHNO SUB DRONE; locked bars L70x.x.....x.x.x... / L84A-x-----x-x-----); CS Test 0-21-0 (a 0.21 project) opened under 0.22 on the way back",
+   "UI cost at 160 BPM (same MPC process, after the restart, 2-minute soaks): closed (CLIP view) 16.4%; CHORDS JAM 35.6 (+19.2); BASS JAM 35.2 (+18.8); MELODY PHRASE 43.3 (+26.9, 0.21 +24.9, the gated page); budget 35",
+   "soak 11 min, CHORDS JAM open, playing: MPC main thread 35.9% average (+19.5), RSS and filmstrips flat, no plugin errors (one libinput touchscreen-lag warning from the keep-awake touches); bar 14 LOCKED shown after the restart",
+   "bench (task 9a): p99 41.8%, worst block 77.1% (second run 41.5 / 77.3), idle p99 25.4, threads 0.0, open 4.5 ms; setcost: JAM block tap ~105 us, knob 1 ~115, TIME up to 266, DENSITY with VAR+TIME off 276, the audio block at a switch no cost above noise; worst existing setter Fix Chord 5 1000 us (0.21: 692)",
+   "budget: BUDGET OK -- skin 78.8/80 MB, binary 529/544 KB, p99 41.8/44, worst 77.1/80, ui_thread +26.9/35 (raised limits owner-approved in 0.22)",
+   "noted for follow-up: the CHORDS and BASS JAM pages cost MPC's UI thread about +19 points each while playing (MELODY JAM +3.5 in 0.21) - the biggest UI cost after PHRASE; CHORDS page on-screen PUSH/DYNAMICS stay continuous (only the Q-Link slots step); JAM COLOUR/SPREAD (and other voicing knobs) turned off the block's value make NOW PLAYING read '(edited)' (turning back clears it); BASS DENSITY THIN on SUB DRONE reads 'THIN' with no WEAK although the notes don't change; BASS VARIATION BARS 2+4 on OCTAVES reads 'weak here' instead of the value; '(edited)' drops the genre ('DUB STAB (edited)'); on-screen knob drags step unevenly (12-24 px a step); MPC's Select Recent list doesn't show new projects; physical Q-Links (stepped PUSH/DYNAMICS, no-jump knob 1) not testable through the remote addin"
+  ]
+ },
+ {
+  "version": "0.22.1",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-23",
+  "includes": "one screen redraw (audioMasterUpdateDisplay) a bar while playing instead of ~5 a second, so MPC's PRESET drawer stops restarting its slide-in every beat (VST-29); PLAY playhead tiles ph_1..16 lit by value report only; PLAY position readout 'BAR <n> · <chord>' once a bar; toolchain chordseq/on-no-update 9aaa6e0 (ON_NO_UPDATE_PREFIX \"ph_\", LIT_UPDATE_ON_TEXT_POLL)",
+  "checks": [
+   "install: tools/deploy.sh; the installed .so matches the package (md5 b75f1c82...), commit e2865e8; filmstrip cache cleaned; 0.22.1 left installed",
+   "CS Test 0-22-0 (Select Recent, then reloaded unsaved from BROWSER > SSD > Projects), PLAY page, playing at 160 BPM: playhead (16 tiles, 4 lit) steps every beat - 20- and 24-frame bursts from the addin's /screen (~130 ms a frame) show the lit group move every ~375 ms and wrap at the bar line, in step with the bar cell",
+   "position readout reads 'BAR 1 · C', 'BAR 2 · G', 'BAR 3 · Am' ... and changes only at bar lines (once in each 1.4-1.5 s); it can trail the bar cell by one frame (~0.1 s, the text poll)",
+   "PRESET drawer (tap x 860, y 70) open while playing: 40 frames over 10.5 s, the drawer fully open and still in 33; its slide-in restarted 4 times, 1.6/2.9/1.6 s apart (bar lines; the ~265 ms sampling misses some). 0.22.0 probe: full width in 5 of 16 and 4 of 13 frames, restarting ~5 a second. A tap outside closes it; a double tap on Init while playing picks it (PRESET reads Init, playback goes on from the Init state)",
+   "sanity while playing: CHORDS JAM - HOUSE OFFBEAT tap shows 'OFFBEAT NEXT' (dashed) at once and takes over at the next bar; BASS JAM - TECHNO OFFBEAT likewise; MELODY JAM - LEAD PHRASE shows NEXT during the touch and switches at bar 1; MELODY PHRASE FORM 1+1 list cell lights during the touch (within ~0.1 s), LOOP clears the next frame",
+   "UI cost (tools/soak.sh 2 min / 10 s, 160 BPM, same MPC process): PLAY open 7.0%, CHORDS JAM 8.3%, BASS JAM 8.2%, MELODY PHRASE 10.4%, closed (CLIP view) 9.3% - 0.22.0: closed 16.4, CHORDS JAM 35.6 (+19.2), BASS JAM 35.2 (+18.8), PHRASE 43.3 (+26.9); RSS and filmstrips flat, no log errors",
+   "bench: p99 41.1%, worst block 76.0%, idle p99 25.0, threads 0.0, open 3.9 ms (0.22.0: 41.8 / 77.1)",
+   "budget: BUDGET OK - skin 78.8/80 MB, binary 529/544 KB, p99 41.1/44, worst 76.0/80, ui_thread +1.1/35",
+   "noted: the drawer still replays its slide-in once a bar (the per-bar redraw); the project was not saved (the Init pick was discarded by reloading CS Test 0-22-0)"
+  ]
+ },
+ {
+  "version": "0.23.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-23",
+  "includes": "genre presets in MPC's PRESET menu after Init: House 124, Techno 130, Trance 138, Pop 110, Rock 120, Disco 118 (src/presets.c recipes on the JAM genre bank, baked into src/presets_data.h); each fills all 6 parts (Intro 8, Verse 8, Pre 4, Chorus 8, Bridge 8, Outro 4 bars) and lands on the Verse; a pick keeps the MIDI channels and FOLLOW (seq_song_load); PLAY's title shows the preset's tempo and sounds hint until the first edit; the loaded preset saved as gn=",
+  "checks": [
+   "install: tools/deploy.sh; the installed .so matches the package (md5 9c8764ad...), branch docs/genre-presets 6db167e + release commits; filmstrip cache cleaned",
+   "fresh project CS Test 0-23-0 on SSD/Projects (CS Test 0-21-0 deleted first, CS Test 0-22-0 kept): Chord Seq on Plugin 001 with a 16-bar clip, Plugin 002 Hype Simple Sub Bass (Chord Seq MIDI Out ch 2), Plugin 003 Hype Default (ch 1), Plugin 004 Hype Ambient Chime Sine (ch 3), arrange loop off, 128 BPM; left on the Force for the owner with House 124 loaded and saved",
+   "PRESET drawer lists Current, Init, House 124, Techno 130, Trance 138, Pop 110, Rock 120, Disco 118; each of the 6 picked (stopped; Pop and Trance also while playing): the PRESET field shows its name, PLAY's title its hint (e.g. 'TECHNO · 130 BPM · STAB, ROLLING BASS, ACID', the longest, fits), the Verse its key and progression (House Am F C G x2, Techno Am drone, Trance Am F C G, Pop Em C G D, Rock Em D C D, Disco Dm G)",
+   "Trance's 6 parts on PLAY: 8 8 4 8 8 4 bars; Intro Epic 2 hits a bar ARP UP, Verse 8 hits ARP UP-DOWN, Pre Lift (Am Dm F Em) ARP PINKY, Chorus 11 hits ARP ALBERTI, Bridge Dream LEAD HALVES, Outro 2 hits; a part tap is an edit: the title returns to the key line (by design)",
+   "MIDI from the Chord Seq ALSA port (arecordmidi, 28 s): House playing, Pop picked at ~15 s: 138 chord / 59 bass / 74 melody note-ons on channels 1-3, no hanging notes; pitch classes A minor before, G major (F#) after the pick",
+   "a single tap in the drawer while playing picks cleanly (Trance 138 shown, hint kept); a double tap's second touch lands on the PLAY page after the drawer closes and counts as an edit (PRESET then reads Current)",
+   "save (Rock 120 loaded) -> decoded state k=4 s=1 gn=5, parts A-F 8 8 4 8 8 4, ch=1,2,3; full Force restart (reboot), load from BROWSER (search) -> PLAY page pixel-identical to before the save (bars, grid, knobs, parts), PRESET 'Current' and title the key line (the program is not saved, by design)",
+   "UI cost at 128 BPM (the remote addin could not open MPC's tempo field, so not 160): PLAY open 5.2%, closed (MATRIX) 3.4% (+1.8, budget 35)",
+   "soak 11 min, PLAY page open, playing (STOP STOP PLAY every 3 min to stay under the 128-bar sequence end): MPC 57.5% (main thread 5.3% average), RSS 679936 -> 679552 kB, filmstrips flat, no log errors; a first 11-min run was discarded (playback had ended at the sequence end before it started)",
+   "bench: p99 43.0%, worst block 76.7% (0.22.1: 41.1 / 76.0), threads 0.0, open 4.1 ms; budget: BUDGET OK - skin 78.8/80 MB, binary 541/544 KB, p99 43.0/44, worst 76.7/80, ui_thread +1.8/35",
+   "browser version: tools/release_web.sh published site/public/try/v1.7.1-e0.23.0/; tests/web_sync.sh WEB SYNC OK",
+   "noted for follow-up: during the 11-min soak the PRESET field and title hint went back to Current / the key line without any touch on the plugin (STOP, STOP and PLAY alone don't clear it, checked after); suspected MPC's screen-dim wake sending a parameter set; cosmetic (the sound is unchanged; re-picking reloads)"
+  ]
+ },
+ {
+  "version": "0.24.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-24",
+  "includes": "PHRASE for CHORDS and BASS, the three-page model JAM · CHORDS/BASS · PHRASE (VST-31): bar editor (paints, picks on any hit = mid-bar chord changes that bass and melody follow, octave per hit, COPY TO ALL / COPY TO...), LOCK WITH, ANTICIPATE, CADENCE / BREATH / FILL, octave rule on every part, NAMES on GLOBAL; release fix: toolchain 9e8b0ab ECHO_GUARD_POLLED_ONLY (PHRASE editor cells act at every touch)",
+  "checks": [
+   "install: tools/deploy.sh of dist/Chord-Seq-0.24.0-mpc-armv7.zip (build aeb3e43, toolchain chordseq/on-no-update 9e8b0ab); installed .so matches the package (md5 4df486c3...); filmstrip cache of earlier starts cleaned. A first install (10ede34+release commits, md5 07a7ca73...) was tested the same afternoon and found the editor-touch bug below",
+   "fresh project CS Test 0-24-0 on SSD/Projects (CS Test 0-22-0 deleted first; CS Test 0-23-0 kept): Chord Seq on Plugin 001, 16-bar clip, arrange loop off, Rock 120 at 128 BPM; no synth tracks: every 'by ear' check is a capture of the Chord Seq ALSA port (arecordmidi); kept on the Force for the owner's verification",
+   "mode cells JAM · CHORDS · PHRASE and JAM · BASS · PHRASE; CHORDS page PROGRESSION / VOICING / OCTAVE with the centre readout (C5 · C3 G3 playing); BASS page STYLE / PEDAL / OCTAVE with the centre 'D Am Bm' and its dots; a status-row bar cell opens PHRASE centred on that bar (FOLLOW paused)",
+   "PHRASE: strip with dots, paging, BACK TO PLAYING, UNDO; a pick on a later hit makes a change point ('6 · 1 change', VII5·v5@13); two points; THIS HIT ONLY; TYPE sus2; hit OCTAVE +1; COPY TO ALL 'Copied to 7 bars'; COPY TO... with SAME IN EVERY PHRASE and RHYTHM + CHORDS copies the changes; ALL / NONE twice; bar pick and unpick; the count reads '5 other bars differ now' (fix)",
+   "mid-bar change heard on all three lanes (capture, bar 6): step 9 chords A3/E4, bass A1, melody E4 (A4 in the same bar without the change); step 13 chords B3/F#4, bass B1",
+   "1/2-bar chord length: a pick on hit 5 lasts only to the next slot (i5·VI5@5·i5@9); capture: E at step 3, C at 5 and 7 (bass C2), E again at 9",
+   "LOCK WITH by capture: BASS WITH CHORDS (bass hits only with the chords, '8 bars follow'), IN THE GAPS (never on a chord hit); CHORDS WITH BASS reports '0 bars follow, 8 keep their own' (every bar had its own rhythm after COPY TO ALL, by design)",
+   "ANTICIPATE by capture: BASS 16TH 'reaches 8 chord changes early' (the next root a 16th before each bar); 8TH and BEAT 'no chord change has rests before it' for that rhythm; CHORDS 8TH '4 chord changes come in early' (changes at 9/13 move to 7/11); with the bass on WITH CHORDS the bass keeps 9/13 (owner to check)",
+   "release fix verified (aeb3e43): CHORDS DONE 5 times stopped and 3 times playing, LOCK/UNLOCK 4 times (label and message alternate), CANCEL 3 times, NEW BAR / RESET BAR twice each, strip page arrows twice each, UNDO repeatedly; BASS DONE 3 times, LOCK/UNLOCK 4 times, NEW BAR / RESET BAR twice, CANCEL twice; and again after save + reboot + reload, DONE 3 times on each lane. Before the fix (10ede34) DONE, CANCEL and LOCK acted only on the first touch",
+   "BASS editor: a note from the piano with OCTAVE 3 shows E3* fixed; FOLLOW CHORD returns it to E1 'follows the chord' (the OCTAVE cell stays lit on 3: cosmetic)",
+   "PHRASE knobs on screen: FILL BREAK drops the phrase's last-bar hits (3 -> 1); BREATH HALF and CADENCE HOME change the phrase end (one hit, top note the chord root D4); values back; knob values per mode kept (sound page STRUM/GATE, JAM VARIATION/SWING/GATE unchanged); knob 7 reads GATE on JAM and the sound pages, FILL on PHRASE",
+   "MELODY: JAM knob 4 OCTAVE reads +1 / -1 / 0; PHRASE knob 4 ANSWER OCT reads NO ANSWER on FORM LOOP (by design); the melody follows a mid-bar change (capture)",
+   "GLOBAL CHORDS SHOW NAMES: the strip shows E5, D5·A5@9..., C5, D5; back to DEGREES",
+   "rhythm line reads 'BACKBEAT: a JAM block's rhythm' (fix); drift meters drawn; dots and ticks clear of the count line",
+   "saved Q-Link map: CHORDS k_s1..k_s8 with knob 7 = k_s7 (1526), BASS k_b1..k_b8 with knob 7 = k_b7 (1527), MELODY as 0.21; physical Q-Links not testable through the remote addin: owner to check by hand",
+   "save, full Force restart (reboot), load from Select Recent: change points, locked bar, 1/2-bar length and the editor fix all as before",
+   "UI cost at 128 BPM, FOLLOW on: CHORDS PHRASE 7.1 %, BASS PHRASE 7.5 %, closed (MATRIX) 3.9 % -> +3.2 / +3.6 points (budget 35)",
+   "soak 11 min, CHORDS PHRASE open, playing (STOP STOP PLAY every 3 min for the 128-bar sequence end): main thread 7.2 %, RSS 656824 -> 656824 kB, filmstrips flat, no log errors",
+   "bench: q-link sweep p99 48.1 / 48.2 / 47.9 %, worst block 65.3 %, idle p99 ~23 %, threads 0.0, open 4.7 ms; budgets raised with the owner: binary 544 -> 688 KB (666), p99 44 -> 49; setcost (probe/setcost_phr.c): worst PHRASE set 337 us (11.6 %); BUDGET OK",
+   "browser version: tools/release_web.sh published site/public/try/v1.9.0-e0.24.0/; tests/web_sync.sh WEB SYNC OK",
+   "noted: the Force dropped off the network once mid-test (owner fixed the network); a JAM-block LOCK -> UNLOCK leaves the bar 'picked' rather than 'own' (to check against the owner's rule)"
+  ]
+ },
+ {
+  "version": "0.24.1",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-25",
+  "includes": "cleanup release, no intended user-visible change: dead code removed (IDEAS system, FIX mode and picker, the 0.18/0.19 RHYTHM page code), every off-skin retired cell family inert; skin (images, layout.conf, params.json) byte-identical to 0.24.0; perf: each drawn lane renders once under LOCK WITH, display caches rebuild only after a set that acts",
+  "checks": [
+   "install: tools/deploy.sh of dist/Chord-Seq-0.24.1-mpc-armv7.zip; installed .so matches the package (md5 2d56c3fc..., same as vst/build/chord_seq.so)",
+   "fresh project CS Test 0-24-1 on SSD/Projects (CS Test 0-23-0 deleted first; CS Test 0-24-0 kept): Chord Seq on Plugin 001, 16-bar clip, arrange loop off; presets House 124 then Rock 120 picked from MPC's PRESET list (PLAY page, title and bars updated at once); no synth tracks: every 'by ear' check is a capture of the Chord Seq ALSA port (arecordmidi)",
+   "every tab and mode opens and responds: PLAY; CHORDS JAM / CHORDS (PROGRESSION arrows Rock -> Royal Road and back, OCTAVE +1 -> E4 B4 in the centre, back to 0) / PHRASE; BASS JAM / BASS / PHRASE; MELODY JAM (HOOK MOTIF queued 'takes over at bar 7', then playing) / PHRASE (FORM 1+1 -> CALL/ANSWER cards, ANSWER ECHO, back to LOOP); GLOBAL (KEY, SCALE, SWITCH AT)",
+   "CHORDS PHRASE: page arrows (FOLLOW PAUSED, BACK TO PLAYING), RHYTHM arrows, LOCK WITH THE BASS WITH BASS ('8 bars follow the bass') and back, ANTICIPATE 8TH and back; bar editor: a pick of iv on hit 9 makes '1 · 1 change i5·iv5@9' at once; COPY TO ALL 'Copied to 7 bars'; DONE 'Kept bar 1.'; bar 2 pick VI then CANCEL 'bar 2 is back as it was'; bar 3 LOCK -> '3 · LOCKED', UNLOCK -> '3 · picked' ('follows the knobs again'), DONE; UNDO -> LOCKED again; every screen updated with the tap, no stale text",
+   "perf paths (BASS LOCK WITH CHORDS on, a CHORDS JAM block (POP SYNCO, SWITCH AT 2 BARS) queued 'takes over at bar 5'): KEY E -> D and SCALE Minor while it waited; GLOBAL, CHORDS JAM (bars Dm C A# C after the switch, the locked bar kept VI5), BASS PHRASE ('Dm -> Gm · 5 notes', 'with the chords') all current at once. Capture (50 s, 540 note-ons): the key change lands (A dorian G/D -> Dm), the block takes over, 128 bass hits all on chord hits (0 bass-only, 0 chord-only steps); the locked bar keeps its own Gospel Push hits and the bass follows them",
+   "PHRASE pick + undo while playing with the bass following: bar 2 v -> '2 · picked v' on CHORDS and BASS strips; capture: bar 2 plays Am (A4 C5 E5) with bass A1 C2 E1 C3 A1 on the same 5 steps (0/0); UNDO -> both strips VII again, capture: bar 2 plays C again, no Am, bass still 0/0",
+   "earlier capture (by design, 0.24): a BASS JAM tap (ROOT 4S, then WALK) turns the bass's LOCK WITH to OWN when the block takes over; 74 bass-only steps then, as expected",
+   "playback readout sampled over time (10 PLAY shots, 128 BPM): BAR n · chord advances 1 -> 8 and wraps, the playhead row moves, the bar strip tile and the vchord readout follow; within about a beat after a bar line the BAR text can lead the tile/vchord by one bar, mid-bar all agree (same once-a-bar update path as 0.22.1; no action involved)",
+   "UI cost at 160 BPM (tempo set through the launch config's number pad), FOLLOW on, 2-min soaks from bar 1, same MPC process: CHORDS PHRASE 8.3 %, BASS PHRASE 9.0 %, PLAY 6.6 %, closed (MATRIX) 4.5 % -> +3.8 / +4.5 / +2.1 points (budget 35; 0.24.0 at 128 BPM +3.2 / +3.6); offline worst screen rate 71.4/s (budget 80, unchanged)",
+   "soak 12 min (vst/soak.txt), CHORDS PHRASE open, playing at 160 BPM (STOP STOP PLAY every 150 s for the 128-bar sequence end): main thread 8.6 %, RSS 659516 -> 659516 kB, filmstrips 238940 -> 238940 kB, no log errors (0.24.0: 11 min at 128 BPM, 7.2 %, RSS flat 656824, filmstrips flat, no errors)",
+   "bench (vst/bench.txt): idle p99 22.4 %, q-link sweep p99 41.9 % / worst block 61.4 % (0.24.0: 23.0 / 48.1 / 65.3); tests/budget.sh BUDGET OK (skin 79.1 MB, binary 622 KB, UI +4.5 points)",
+   "save, reload from Select Recent (an accidental PRE part tap after the save was discarded: VERSE came back), full Force restart (reboot), reopen: D MINOR, bars Dm C A# C Dm C A# C, '1 · 1 change i·iv@9', '3 · LOCKED VI5', SYNCO rhythm, BASS WITH CHORDS, MELODY HOOK · MOTIF all as saved; playback after the reboot captured (bass 0/0 on the chords); the plugin chunk re-saved after the reboot is byte-identical to the first save (1697 bytes, md5 a8b782a0...)",
+   "noted: the Chord Seq ALSA port's client number changes across reboots (137:0 -> 136:0); capture scripts must look it up. CS Test 0-24-1 kept on the Force for the owner's verification (with CS Test 0-24-0: 2 test projects)"
+  ],
+  "result": "pass"
+ },
+ {
+  "version": "0.25.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-26",
+  "includes": "rename Chord Seq -> Cadenza (VST-48): name and vendor Cadenza, cadenza.so in /sdcard/Synths/Cadenza - VST - Cadenza/, ALSA client Cadenza (MPC port Cadenza MIDI Out); uid ChSq unchanged; no engine change",
+  "checks": [
+   "install: tools/deploy.sh of dist/Cadenza-0.25.0-mpc-armv7.zip over 0.24.2; installed .so matches the package (md5 cfebe784...); the old Shrey Sharma - VST - Chord Seq folder removed; MPC.settings holds one entry (name Cadenza, uid 43685371) and no 'Chord Seq'",
+   "bench on the Force before install: p99 39.9%, worst block 55.5% (budget 49 / 80; toolchain verdict FAIL from its q-link sweep, as since 0.24)",
+   "fresh project CS Test 0-25-0 on SSD/Projects (CS Test 0-24-0 deleted first; CS Test 0-24-1 kept): Hype tracks Pads (Warm Analog Pad), Bass (Basic Saw Bass), Melody (Saw Lead), tempo 120, 16-bar clip",
+   "How to? setup tour re-captured on this build (29 beats, no dropped touch): plugin browser shows VST > Cadenza > Cadenza, Cadenza loads on Plugin 001, the three tracks take Cadenza MIDI Out on ch 1/2/3, clip, Init, GLOBAL A / Minor / 2 Bars, PLAY plays in A minor",
+   "MIDI from the Cadenza ALSA port (arecordmidi, 5 s): notes out, connected to MPC's Cadenza MIDI Out (135:10)",
+   "PRESET House 124 loaded; landing tour captured (16 beats, plugin crop): PLAY lanes and parts, CHORDS/BASS/MELODY JAM (one block tapped), CHORDS page knobs, BASS page, CHORDS PHRASE strip and bar editor",
+   "save, full Force restart (reboot over SSH), reload CS Test 0-25-0: Cadenza loads with the House song (A minor), PLAY sends MIDI again (423 bytes in 5 s)",
+   "old project: CS Test 0-24-1 (saved with Chord Seq 0.24.1) opens with Cadenza and its song (D minor) intact, since the uid is unchanged; its instrument tracks still name the old port and need Cadenza MIDI Out picked again",
+   "kept on the Force: CS Test 0-25-0 and CS Test 0-24-1 (2 test projects)"
+  ],
+  "result": "pass"
+ }
+]
