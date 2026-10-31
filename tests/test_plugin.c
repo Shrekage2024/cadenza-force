@@ -200,7 +200,7 @@ static void en_press(const mpc_engine_t *en, void *x, const char *key) {
 /* A 0..100 knob's value as the wrapper reports it (0.13: a dynamic_display knob's display is the engine's text) */
 static void number(AEffect *a, const char *key, char *buf) { snprintf(buf, 16, "%ld", lroundf(a->getP(a, idx(key)) * 100)); }
 
-static void no_emit(void *ctx, int status, int note, int vel) { (void)ctx; (void)status; (void)note; (void)vel; }
+static void no_emit(void *ctx, int status, int note, int vel, int frame) { (void)ctx; (void)status; (void)note; (void)vel; (void)frame; }
 
 /* An instance with the pre-0.15 start (E minor 1-6-3-7, Chords Pulse, Bass Root, a classic Hook), loaded as a project
  * saved untouched, then run past the load guard: the tests written for that start. 0.15 instances start at INIT. (0.19: the load
@@ -796,6 +796,13 @@ static void test_parts(void) {
     e->setP(e, idx("pt_2"), 1.0f);  run(e, 2, 0);
     lane_cells(e, 3, now);
     CHECK(same_cells(verse, now), "back to the Verse: the grid shows the Verse again");
+    /* 0.26 each part its own mutes: the lane-name tiles show the playing part's */
+    e->setP(e, idx("mt_2"), 1.0f);  run(e, 2, 0);
+    e->setP(e, idx("pt_4"), 1.0f);  run(e, 2, 0);
+    CHECK(e->getP(e, idx("mt_2")) < 0.5f && e->getP(e, idx("mute_2")) < 0.5f, "Bass muted in the Verse: the Chorus's mt_2 is unlit");
+    e->setP(e, idx("pt_2"), 1.0f);  run(e, 2, 0);
+    CHECK(e->getP(e, idx("mt_2")) > 0.5f && e->getP(e, idx("mute_2")) > 0.5f, "back to the Verse: mt_2 lit again");
+    e->setP(e, idx("mt_2"), 0.0f);  run(e, 2, 0);
 
     /* playing: a tap queues, pos names it, the switch is at the next bar line */
     bpm = 120.0;
@@ -2422,7 +2429,7 @@ static void test_17_leaving_closes(void) {
     eng_set(en, x, "k_harm", eng_num(en, x, "k_harm"));
     eng_set(en, x, "swing", eng_num(en, x, "swing"));
     eng_set(en, x, "l3_1", seq_step_on(q, LANE_MEL_UP, 0));
-    eng_set(en, x, "mute_2", q->mute[LANE_BASS]);
+    eng_set(en, x, "mute_2", seq_mute(q, LANE_BASS));
     en->set_param(x, "sc_2", "0");     /* a select cell's release */
     en->set_param(x, "gen_1", "0");    /* a trigger's release */
     en->set_param(x, "l3_1_on", "1");  /* no set */

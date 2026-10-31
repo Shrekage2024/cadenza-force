@@ -2,6 +2,7 @@
 #include "jamlib.h"
 #include "theory.h"
 #include "util.h"
+#include <pthread.h>   /* VST-33: the COMPLEXITY table's one build (pthread_once) */
 #include <string.h>
 
 /* The library, in the RHYTHMS browser's order (4 per group). Codes: A accent, x hit, g ghost, - hold, . rest. Of the nine
@@ -366,10 +367,12 @@ static cx_offsets_t cx_offsets_of(int cx) {
 /* 0.18 perf: the offsets of every COMPLEXITY 0..100, made once (rhythm_init, on the first instance's UI thread) and only read
  * after: each costs 17 double divisions, and the setters' labels and the audio thread ask for it per chord and step. Until
  * the table is made (or for a value outside 0..100) the offsets are worked out as they are asked for. The table is made
- * before the first instance exists, so a reader on another thread got the instance after it (a relaxed read suffices). */
+ * before the first instance exists, so a reader on another thread got the instance after it (a relaxed read suffices). VST-33:
+ * made under pthread_once, so two instances created on two threads at once both wait for the one build. */
 static cx_offsets_t cx_table[101];
 static unsigned char cx_flat[101];   /* rhythm_cx_colour_flat */
-static int cx_table_state;   /* 0 empty, 1 being made, 2 made */
+static int cx_table_state;   /* 0 empty, 2 made */
+static pthread_once_t cx_once = PTHREAD_ONCE_INIT;
 
 static int colour_flat_of(int cx) {
     cx_offsets_t a = cx_offsets_of(clampi(cx - 2, 0, 100));
@@ -380,12 +383,12 @@ static int colour_flat_of(int cx) {
     return 1;
 }
 
-void rhythm_init(void) {
-    int empty = 0;
-    if (!__atomic_compare_exchange_n(&cx_table_state, &empty, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+static void cx_table_build(void) {
     for (int cx = 0; cx <= 100; cx++) cx_table[cx] = cx_offsets_of(cx), cx_flat[cx] = (unsigned char)colour_flat_of(cx);
     __atomic_store_n(&cx_table_state, 2, __ATOMIC_RELEASE);
 }
+
+void rhythm_init(void) { pthread_once(&cx_once, cx_table_build); }
 
 static int cx_ready(int cx) { return cx >= 0 && cx <= 100 && __atomic_load_n(&cx_table_state, __ATOMIC_RELAXED) == 2; }
 

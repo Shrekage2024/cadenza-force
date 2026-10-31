@@ -30,6 +30,7 @@
 #include "keyflags.h"   /* 0.19.1 vst/build: made by vst/make_skin.py */
 #include <dlfcn.h>
 #include <math.h>
+#include <pthread.h>   /* VST-33: the tap index's one build (pthread_once) */
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -281,8 +282,9 @@ static void alsa_open(inst_t *s) {
     s->alsa_out = out_fn;
 }
 
-static void alsa_send(void *ctx, int status, int a, int b) {
+static void alsa_send(void *ctx, int status, int a, int b, int frame) {
     inst_t *s = ctx;
+    (void)frame;   /* MPC takes the port's events as they come: every one at the block's start (docs/MIDI_TIMING.md) */
     if (!s->alsa_out || a < 0 || a > 127) return;
     seq_ev ev;
     memset(&ev, 0, sizeof ev);
@@ -477,7 +479,6 @@ static const char *const LENGTH_NAMES[5] = {"1 Bar", "2 Bars", "4 Bars", "8 Bars
 static const char *const CHORD_LEN_NAMES[4] = {"2 Bars", "1 Bar", "1/2 Bar", "1/4 Bar"};
 
 static int never_on(const seq_t *q, int i) { (void)q; (void)i; return 0; }
-static int mt_on(const seq_t *q, int i) { return q->mute[i]; }
 static void mt_tap(seq_t *q, int i, int v) { seq_set_mute(q, i, v); }
 static int mt_label(const seq_t *q, int i, char *buf, int len) { (void)q; return put(buf, len, LANE_NAMES[i]); }
 /* The strip's 8 cells are bars 1..8, lit on seq_strip_bar (the playing bar while following; the grid keeps its bar); past the
@@ -3622,7 +3623,7 @@ PH_TAP(x, ph_x_tap) PH_LABEL(x, ph_x_label)
 static const tap_t TAPS[] = {
     /* 0.17 KEYS first: 62 cells polled every 10 ms, found after two entries (parse_kind tries the entries in order) */
     TAP("kyw_", 35, 1, kyw_on, kyw), TAP("kyb_", 25, 1, kyb_on, kyb),
-    TAP("mt_", SEQ_ACTIVE_LANES, 0, mt_on, mt), TAP("bar_", 8, 0, bar_on, bar), TAP("fol_", 1, 0, fol_on, fol),
+    TAP("mt_", SEQ_ACTIVE_LANES, 0, seq_mute, mt), TAP("bar_", 8, 0, bar_on, bar), TAP("fol_", 1, 0, fol_on, fol),
     TAP("act_", 2, 0, never_on, act), TAP("kw_", 7, 1, kw_on, kw), TAP("kb_", 5, 1, kb_on, kb), TAP("kb2_", 3, 1, kb2_on, kb2), TAP("sc_", 8, 1, sc_on, sc),
     TAP("ln_", 5, 1, ln_on, ln), TAP("cl_", 4, 1, cl_on, cl), TAP("new_", 1, 0, never_on, new),
     TAP("gl_", SEQ_ACTIVE_LANES + 1, 0, never_on, gl), TAP("pt_", SEQ_NPARTS, 0, pt_on, pt),
@@ -3728,13 +3729,12 @@ static int read_num(const char **p, int max) {   /* 1..max -> 0-based index, els
 _Static_assert(NTAPS < 255, "tap_head and tap_next hold an entry + 1 in a byte");
 static unsigned char tap_head[128], tap_next[NTAPS];   /* entry + 1, 0 none */
 static unsigned char tap_flags[NTAPS];   /* 0.19.1 each entry's cells' flags (vst/build/keyflags.h), read once */
-static int tap_index_state;   /* 0 empty, 1 being made, 2 made */
+static int tap_index_state;   /* 0 empty, 2 made (VST-33: made under pthread_once, as the core's tables) */
+static pthread_once_t tap_index_once = PTHREAD_ONCE_INIT;
 static unsigned tap_bucket(const char *k) {   /* a key shorter than 3 reads its 0 there: no prefix is */
     return (((unsigned char)k[0] * 31u + (unsigned char)k[1]) * 31u + (unsigned char)(k[1] ? k[2] : 0)) & 127u;
 }
-static void tap_index_init(void) {
-    int empty = 0;
-    if (!__atomic_compare_exchange_n(&tap_index_state, &empty, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+static void tap_index_build(void) {
     for (size_t t = NTAPS; t-- > 0;) {
         unsigned b = tap_bucket(TAPS[t].prefix);
         tap_next[t] = tap_head[b];
@@ -3743,6 +3743,7 @@ static void tap_index_init(void) {
     }
     __atomic_store_n(&tap_index_state, 2, __ATOMIC_RELEASE);
 }
+static void tap_index_init(void) { pthread_once(&tap_index_once, tap_index_build); }
 
 /* 1 if key starts with TAPS[t]'s prefix (k and p then the cell, k->b -1 if its number is no cell's) */
 static int tap_match(const char *key, size_t t, skey_t *k, const char **p) {
@@ -4374,7 +4375,7 @@ static int set_acts(const inst_t *s, const char *key, skey_t k, const char *val)
     if (k.on) return 0;
     if (k.kind == K_TAP) return v > 0 || !TAPS[k.a].select;
     if (k.kind == K_CELL) return (v > 0) != seq_step_on(q, k.a, k.b);
-    if (k.kind == K_MUTE) return (v > 0) != q->mute[k.a];
+    if (k.kind == K_MUTE) return (v > 0) != seq_mute(q, k.a);
     if (trigger_index(key) >= 0) return v > 0;
     if (key[0] == 'k' && key[1] == '_' && kguard_holds(s, key, v)) return 0;
     return option_value(q, key, &cur) && v != cur;
@@ -5288,7 +5289,7 @@ static int get_param(void *p, const char *key, char *buf, int len) {
         return k.on ? put_flag(buf, len, seq_cur_step(q) >= 0 && seq_cur_step(q) / 4 == k.a / 4 && seq_cur_bar(q) == seq_grid_bar(q))
                     : put(buf, len, " ");
     case K_CHORD: return k.on ? put_flag(buf, len, seq_cur_slot(q) == k.a) : seq_slot_name(q, k.a, buf, len);
-    case K_MUTE: return k.on ? 0 : put_flag(buf, len, q->mute[k.a]);
+    case K_MUTE: return k.on ? 0 : put_flag(buf, len, seq_mute(q, k.a));
     case K_TAP: return k.on ? put_flag(buf, len, TAPS[k.a].on(q, k.b) || latched(p, k)) : TAPS[k.a].label(q, k.b, buf, len);
     default: break;
     }

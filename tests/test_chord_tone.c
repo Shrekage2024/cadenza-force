@@ -6,7 +6,7 @@ static int fails;
 
 #define CHECK(c, ...) do { printf("%s ", (c) ? "ok  " : "FAIL"); printf(__VA_ARGS__); printf("\n"); if (!(c)) fails++; } while (0)
 
-static void emit(void *ctx, int status, int note, int vel) { (void)ctx, (void)status, (void)note, (void)vel; }
+static void emit(void *ctx, int status, int note, int vel, int frame) { (void)ctx, (void)status, (void)note, (void)vel, (void)frame; }
 
 /* A last onset on the 7th of slot 0 (the Walk's APPROACH keeps a chord tone and moves a passing tone) */
 static int approach_moves(seq_t *s, int colour) {
