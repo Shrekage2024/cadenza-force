@@ -31,7 +31,7 @@
 static int fails;
 #define CHECK(c, ...) do { printf("%s ", (c) ? "ok  " : "FAIL"); printf(__VA_ARGS__); printf("\n"); if (!(c)) fails++; } while (0)
 
-static void emit(void *ctx, int status, int note, int vel) { (void)ctx, (void)status, (void)note, (void)vel; }
+static void emit(void *ctx, int status, int note, int vel, int frame) { (void)ctx, (void)status, (void)note, (void)vel, (void)frame; }
 
 enum { K_DENS, K_RNG, K_VAR, K_SWING, K_TIME, K_N };
 static const char *const KNAME[K_N] = {"DENSITY", "RANGE", "VARIATION", "SWING", "TIME"};

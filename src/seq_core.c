@@ -7,6 +7,7 @@
 #include "util.h"
 #include "voicing.h"
 #include <math.h>
+#include <pthread.h>   /* VST-33: the lookup tables' one build (pthread_once) */
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -345,8 +346,8 @@ static void fill_phrase(seq_part_t *p, int n, const int *deg, const unsigned cha
  * (i x new / old) % old slots, with its src, colour and lock. Hidden slots remap too (the slots past filled_slots read as
  * a grow would fill them), so a shrunk loop's hidden chords stay at their times. */
 static void remap_slots(seq_part_t *p, int old_cl) {
-    static int prog[SEQ_MAX_PROG];   /* setters run one at a time (the wrapper's lock); not on the audio thread */
-    static unsigned char src[SEQ_MAX_PROG], col[SEQ_MAX_PROG];
+    int prog[SEQ_MAX_PROG];   /* a setter's own (several instances set at once on iOS, VST-33): 384 bytes of stack */
+    unsigned char src[SEQ_MAX_PROG], col[SEQ_MAX_PROG];
     uint64_t lock = 0;
     int cl = p->chord_len, n = slots_of(p->bars, old_cl), filled = p->filled_slots, q = grow_period(p, n), h = p->phrase, r = p->rank_len;
     int f = (filled * old_cl + cl - 1) / cl;
@@ -420,13 +421,13 @@ static int colour_cx(const seq_part_t *p, int i) {
 /* 0.18 perf: where the colour layers are flat (rhythm_cx_colour_flat) a chord's level is one per COMPLEXITY and user COLOUR, so
  * it is looked up: lv_flat the level before the Tension step, lv_ten with it (LV_NONE: no Tension step), for every cx 0..100 and
  * COLOUR -1..4; lv_ok[cx] 1 where flat. Made once from rhythm's offsets by seq_init (level_table_init), read only after; until
- * then chord_level works the level out. */
+ * then chord_level works the level out. VST-33: made under pthread_once, so two instances created on two threads at once
+ * (an iOS host's) both wait for the one build, and every thread that gets an instance after its seq_init reads a made table. */
 #define LV_NONE (-128)
 static signed char lv_flat[101][6], lv_ten[101][6], lv_ok[101];
-static int lv_state;   /* 0 empty, 1 being made, 2 made */
-static void level_table_init(void) {
-    int empty = 0;
-    if (!__atomic_compare_exchange_n(&lv_state, &empty, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
+static int lv_state;   /* 0 empty, 2 made */
+static pthread_once_t lv_once = PTHREAD_ONCE_INIT;
+static void level_table_build(void) {
     for (int cx = 0; cx <= 100; cx++) {
         cx_offsets_t o = rhythm_cx_offsets(cx);
         lv_ok[cx] = (signed char)rhythm_cx_colour_flat(cx);
@@ -438,6 +439,7 @@ static void level_table_init(void) {
     }
     __atomic_store_n(&lv_state, 2, __ATOMIC_RELEASE);
 }
+static void level_table_init(void) { pthread_once(&lv_once, level_table_build); }
 
 /* The COLOUR level a Knobs chord (own colour Triad) on degree deg of scale sc plays in slot i: vcol under COMPLEXITY's colour
  * layers. The Tension layer (cx_offsets_t.tension) adds its step only where it makes no avoid note (theory_avoid; coupling
@@ -1661,6 +1663,7 @@ void seq_init(seq_t *s, seq_emit_fn emit, void *ctx) {
     memset(s, 0, sizeof *s);
     s->emit = emit;
     s->ctx = ctx;
+    s->rate = 44100.0;
     s->cur_k = -1;
     forget_pushes(s);
     s->queued = -1;
@@ -2281,8 +2284,18 @@ int seq_cell_label(const seq_t *s, int lane, int step, char *buf, int len) {
     return theory_note_name(n[0], buf, len);
 }
 
+/* The frame of the block being played that song position `at` falls on: 0 outside a block (a setter's event) or before the
+ * block's interval (a late note-off is sent at once), the last frame at or past its end. */
+static int frame_of(const seq_t *s, double at) {
+    if (!s->in_block || s->blk_frames <= 0 || !(s->blk_end > s->blk_start) || at <= s->blk_start) return 0;
+    if (at >= s->blk_end) return s->blk_frames - 1;
+    return (int)((at - s->blk_start) / (s->blk_end - s->blk_start) * s->blk_frames);
+}
+
+static void emit_at(seq_t *s, double at, int status, int note, int vel) { s->emit(s->ctx, status, note, vel, frame_of(s, at)); }
+
 static void release(seq_t *s, int i) {
-    s->emit(s->ctx, s->pending[i].status_off, s->pending[i].note, 0);
+    emit_at(s, s->pending[i].off_ppq, s->pending[i].status_off, s->pending[i].note, 0);
     s->pending[i] = s->pending[--s->npending];
 }
 
@@ -2305,13 +2318,13 @@ static void release_all(seq_t *s) {
 /* GATE's curve: x0.2 at 0, exactly 1 at 50, x2 at 100 */
 static double gate_curve(int g) { return g <= 50 ? 0.2 + 0.8 * g / 50.0 : 1.0 + (g - 50) / 50.0; }
 
-/* A note-on on the lane's channel, its note-off queued for `end` */
-static void sound(seq_t *s, int lane, int note, int vel, double end) {
+/* A note-on on the lane's channel at song position t, its note-off queued for `end` */
+static void sound(seq_t *s, int lane, int note, int vel, double t, double end) {
     int off = 0x80 | (seq_channel(s, lane) - 1);
     for (int i = 0; i < s->npending; i++)   /* a retrigger ends the held note first */
         if (s->pending[i].status_off == off && s->pending[i].note == note) { release(s, i); break; }
     if (s->npending == SEQ_MAX_PENDING) release(s, 0);   /* never leave a note hanging */
-    s->emit(s->ctx, 0x90 | (off & 0x0f), note, vel);
+    emit_at(s, t, 0x90 | (off & 0x0f), note, vel);
     s->pending[s->npending++] = (seq_pending_t){off, note, end};
 }
 
@@ -2321,14 +2334,14 @@ static void note_on(seq_t *s, int lane, int note, int vel, double t, int len, do
     double f = gate_curve(s->gate), end = t + len * 0.25 * gf * f - GATE_TAIL;
     long v = lround(vel * (40.0 + 1.2 * s->dyn) / 100.0);
     if (end < t + 0.02) end = t + 0.02;
-    sound(s, lane, note, v < 1 ? 1 : v > 127 ? 127 : (int)v, end);
+    sound(s, lane, note, v < 1 ? 1 : v > 127 ? 127 : (int)v, t, end);
 }
 
 /* 0.12 audition: the queue goes out at t (the block's time on the pending queue's clock), 4 steps long, velocity 100 */
 #define AUDITION_VEL 100
 #define AUDITION_BEATS (4 * 0.25 - GATE_TAIL)
 static void audition_due(seq_t *s, double t) {
-    for (int i = 0; i < s->naud; i++) sound(s, s->aud[i].lane, s->aud[i].note, AUDITION_VEL, t + AUDITION_BEATS);
+    for (int i = 0; i < s->naud; i++) sound(s, s->aud[i].lane, s->aud[i].note, AUDITION_VEL, t, t + AUDITION_BEATS);
     s->naud = 0;
 }
 
@@ -2504,7 +2517,7 @@ static double lane_swing_late(const seq_t *s, const seq_part_t *p, int lane, int
 static void fire_lane(seq_t *s, int lane, int bar, int step, long k, double t) {
     const seq_part_t *p = ccur(s);
     seq_step_t x = play_step(p, lane, bar, step, k);
-    if (!x.on || s->mute[lane]) return;
+    if (!x.on || p->lane[lane].mute) return;
     if (dl_of(lane) >= 0 && (p->sflag[dl_of(lane)][bar * SEQ_STEPS + step] & SF_EARLY)) s->early_k[lane] = k + AN_STEPS[p->an[dl_of(lane)]];   /* 0.24 */
     /* a DRAWN Chords step's abs is always 0 (only rhythm_to_steps writes its steps), so x.abs is safe: a DRAWN Bass's note or 0 */
     int v = 64 + (x.vel - 64) * lane_dyn(p, lane) / 50, note = lane_drawn(p, lane) ? x.abs : 0;
@@ -2522,7 +2535,7 @@ static void fire_tied(seq_t *s, int lane, int bar, int step, long k, double t) {
     const seq_part_t *p = ccur(s);
     int d = dl_of(lane), len = p->bars * SEQ_STEPS, i = bar * SEQ_STEPS + step, n, e, v;
     seq_step_t x;
-    if (d < 0 || !lane_drawn(p, lane) || !(p->sflag[d][i] & SF_TIED) || s->mute[lane] || s->early_k[lane] == k) return;
+    if (d < 0 || !lane_drawn(p, lane) || !(p->sflag[d][i] & SF_TIED) || p->lane[lane].mute || s->early_k[lane] == k) return;
     n = AN_STEPS[p->an[d]], e = (i - n + len) % len;
     x = play_step(p, lane, e / SEQ_STEPS, e % SEQ_STEPS, k - n);
     if (!x.on || !(p->sflag[d][e] & SF_EARLY) || x.len <= n) return;
@@ -2663,7 +2676,7 @@ static void push_next(seq_t *s, double end) {
     for (int lane = 0; lane < SEQ_ACTIVE_LANES; lane++) {
         int push = lane_push(p, lane);
         if (!push || s->pushed_k[lane] == k || (lane == LANE_MEL_UP && mel_switch_due(s, k)) || (dl_of(lane) >= 0 && djq_due(s, dl_of(lane), k)) ||
-            !play_step(p, lane, idx / SEQ_STEPS, idx % SEQ_STEPS, k).on || s->mute[lane]) continue;
+            !play_step(p, lane, idx / SEQ_STEPS, idx % SEQ_STEPS, k).on || p->lane[lane].mute) continue;
         double t = step_time(s, k) - push / 100.0 * 0.125;
         if (t >= end - EPS) continue;
         s->pushed_k[lane] = k;
@@ -2730,6 +2743,7 @@ static void switch_part(seq_t *s, long origin_k) {
     djq_drop_all(s);   /* 0.22: and the drawn lanes' */
     s->move_text[0] = 0;   /* the old part's move feedback does not carry over */
     s->part_origin_k = origin_k;
+    if (cur(s)->lane[LANE_CHORDS].mute) memset(&s->keys, 0, sizeof s->keys);   /* 0.26 the mutes are the new part's */
     if (s->txn.kind) s->txn.stale = 1;   /* 0.17: an open picker or browser is the old part's: the next setter cancels it */
     paging_off(s);   /* and a paging pause ends (ruling 18) */
     s->cur_k = -1;   /* no step of the new part fired yet (fire() follows at once while playing) */
@@ -2737,17 +2751,32 @@ static void switch_part(seq_t *s, long origin_k) {
     s->display_rev++;   /* MPC re-reads the new part's values (its knobs); a plain count, fine on the audio thread */
 }
 
+/* The beats a block of `frames` frames spans at bpm and the host's sample rate (seq_set_rate) */
+static double block_beats(const seq_t *s, double bpm, int frames) { return frames * bpm / (60.0 * s->rate); }
+
 /* Stopped: the pending queue (only auditions: a stop ended the rest) runs on idle_ppq, beats of stopped blocks at the
- * host tempo (120 when it gives none), so their note-offs come on time. 44100 Hz, as the resync's block length in
- * seq_block assumes (MPC runs at 44.1 kHz). */
+ * host tempo (120 when it gives none), so their note-offs come on time. */
 static void idle_block(seq_t *s, double bpm, int frames) {
+    s->blk_start = s->idle_ppq;
+    s->blk_end = s->idle_ppq + block_beats(s, bpm > 0 ? bpm : 120.0, frames);
     audition_due(s, s->idle_ppq);
-    s->idle_ppq += frames * (bpm > 0 ? bpm : 120.0) / (60.0 * 44100.0);
+    s->idle_ppq = s->blk_end;
     release_where(s, s->idle_ppq, -1);
     if (!s->npending) s->idle_ppq = 0;   /* nothing timed on it: keep it small */
 }
 
+void seq_set_rate(seq_t *s, double hz) { if (hz > 0) s->rate = hz; }
+
+static void block(seq_t *s, double ppq, double bpm, int playing, int frames);
+
 void seq_block(seq_t *s, double ppq, double bpm, int playing, int frames) {
+    s->in_block = 1;
+    s->blk_frames = frames;
+    block(s, ppq, bpm, playing, frames);
+    s->in_block = 0;
+}
+
+static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
     s->bpm = bpm;
     if (!playing || ppq < 0 || bpm <= 0) {
         if (s->playing) {
@@ -2776,6 +2805,8 @@ void seq_block(seq_t *s, double ppq, double bpm, int playing, int frames) {
         s->idle_ppq = 0;
         s->last_ppq = ppq;
         s->next_k = first_k_at(s, ppq);
+        s->blk_start = ppq;   /* the auditions at the block's first frame */
+        s->blk_end = ppq + block_beats(s, bpm, frames);
         audition_due(s, ppq);
         return;
     }
@@ -2786,12 +2817,14 @@ void seq_block(seq_t *s, double ppq, double bpm, int playing, int frames) {
         end = start;   /* a tempo change stepped the position back a little: hold the high-water mark, play nothing twice */
     } else if (end < start || end - start > 1.0) {
         int back = end < start;   /* loop wrap, locate back, or a jump forward: resync without flooding */
-        start = end - frames * bpm / (60.0 * 44100.0);
+        start = end - block_beats(s, bpm, frames);
         s->next_k = first_k_at(s, start);
         if (!back || !keep_pushed(s, s->next_k)) release_all(s);
     }
+    s->blk_start = start;   /* frame_of: the events of [start, end) at their frames of this block */
+    s->blk_end = end;
     audition_due(s, end);
-    if (s->move_text[0] && (s->move_secs -= frames / 44100.0) <= 0) s->move_text[0] = 0;   /* 4 s of playback (any tempo) */
+    if (s->move_text[0] && (s->move_secs -= frames / s->rate) <= 0) s->move_text[0] = 0;   /* 4 s of playback (any tempo) */
     release_where(s, end, -1);
     /* In order, each once: next_k only moves forward. Start and resync put step_time(next_k) at or after `start`, so every
      * step reached fires; one whose time moved before `start` (SWING lowered while it was pending) fires late, not never. */
@@ -2820,7 +2853,7 @@ void seq_all_notes_off(seq_t *s) {
     act(s);
     s->naud = 0;
     release_all(s);
-    for (int lane = 0; lane < SEQ_ACTIVE_LANES; lane++) s->emit(s->ctx, 0xB0 | (seq_channel(s, lane) - 1), 123, 0);
+    for (int lane = 0; lane < SEQ_ACTIVE_LANES; lane++) s->emit(s->ctx, 0xB0 | (seq_channel(s, lane) - 1), 123, 0, 0);
 }
 
 static void tap_generated(seq_t *s, seq_part_t *p, int lane, int i, int on);
@@ -3049,14 +3082,16 @@ int seq_mel_poll(seq_t *s) {
 
 void seq_set_mute(seq_t *s, int lane, int muted) {
     if (lane < 0 || lane >= SEQ_ACTIVE_LANES) return;
-    if (s->mute[lane] != (muted ? 1 : 0)) act(s);
-    s->mute[lane] = muted ? 1 : 0;
+    if (cur(s)->lane[lane].mute != (muted ? 1 : 0)) act(s);
+    cur(s)->lane[lane].mute = muted ? 1 : 0;
     if (!muted) return;
     if (lane == LANE_CHORDS) memset(&s->keys, 0, sizeof s->keys);
     release_where(s, -INFINITY, 0x80 | (seq_channel(s, lane) - 1));   /* the sequence keeps running; only its sound stops */
     drop_strum(s, lane, -INFINITY);
     if (dl_of(lane) >= 0) s->hum[dl_of(lane)].on = 0;   /* and HUMANIZE's waiting hit */
 }
+
+int seq_mute(const seq_t *s, int lane) { return lane >= 0 && lane < SEQ_ACTIVE_LANES && ccur(s)->lane[lane].mute; }
 
 #define BAR_LOCK (SEQ_STEPS / 8)   /* lock bytes per bar */
 
@@ -3508,13 +3543,12 @@ static void out_mel(out_t *o, char c, const mel_recipe_t *r) {
         outf(o, "|%c3.mp=%d,%d,%d,%d", c, r->ph[MP_FORM], r->ph[MP_BREATH], r->ph[MP_CADENCE], r->ph[MP_FILL]);
 }
 
-/* A part's lanes; the mutes are global, so only part A carries them (mute NULL: 0). 0.10: after the Bass's fields,
- * `<c>2.bs=` its SHAPE values in BSHAPE order, only when not neutral (0.9 ignores it). */
-static void save_part_lanes(out_t *o, const seq_t *s, char c, const seq_part_t *p, const prog_view_t *v,
-                            const unsigned char *mute) {
+/* A part's lanes; mutes 0 writes its mutes as 0 (0.26: parts B-F when every part has A's, which a load gives them). 0.10:
+ * after the Bass's fields, `<c>2.bs=` its SHAPE values in BSHAPE order, only when not neutral (0.9 ignores it). */
+static void save_part_lanes(out_t *o, const seq_t *s, char c, const seq_part_t *p, const prog_view_t *v, int mutes) {
     for (int l = 0; l < SEQ_LANES; l++) {
         const seq_lane_t *ln = &p->lane[l];
-        save_lane(o, s, c, p, v, l, mute ? mute[l] : 0, ln);
+        save_lane(o, s, c, p, v, l, mutes && ln->mute, ln);
         if (l == LANE_MEL_UP && ln->gen.style == GEN_MEL_RECIPE) out_mel(o, c, &p->mel);
         if (l != LANE_BASS) continue;
         const int *sh = p->lane_shape[l];
@@ -3522,6 +3556,16 @@ static void save_part_lanes(out_t *o, const seq_t *s, char c, const seq_part_t *
         outf(o, "|%c2.bs=", c);
         for (int i = 0; i < BSHAPE_COUNT; i++) outf(o, i ? ",%d" : "%d", sh[i]);
     }
+}
+
+/* 0.26 1 if a part in use mutes other lanes than the Verse */
+static int mutes_differ(const seq_t *s) {
+    for (int p = 1; p < SEQ_NPARTS; p++) {
+        if (!seq_part_used(s, p)) continue;
+        for (int l = 0; l < SEQ_LANES; l++)
+            if (s->part[p].lane[l].mute != s->part[0].lane[l].mute) return 1;
+    }
+    return 0;
 }
 
 /* The Verse is part A, whatever plays, with the project's settings between its head and its lanes (as 0.3-0.7 wrote it).
@@ -3539,7 +3583,9 @@ static int save_state(seq_t *s, char *buf, int len) {
     if (s->dyn != 50) outf(&o, "|dy=%d", s->dyn);
     if (!s->follow) outf(&o, "|fo=0");   /* only when off: a state with FOLLOW on saves as 0.16 did */
     if (s->preset) outf(&o, "|gn=%d", s->preset);   /* 0.23 only when set: a state without a preset saves as 0.22 did */
-    save_part_lanes(&o, s, 'A', &s->part[0], &v, s->mute);
+    int pm = mutes_differ(s);
+    if (pm) outf(&o, "|pm=1");   /* 0.26 only then: a state whose parts share the Verse's mutes saves as 0.25 did */
+    save_part_lanes(&o, s, 'A', &s->part[0], &v, 1);
     if (o.n >= len) {
         s->unsaved_mask = s->used_mask;
         return 0;
@@ -3549,7 +3595,7 @@ static int save_state(seq_t *s, char *buf, int len) {
         int at = o.n;
         v = part_view(&s->part[p]);
         save_part_head(&o, (char)('A' + p), &s->part[p], &v);
-        save_part_lanes(&o, s, (char)('A' + p), &s->part[p], &v, NULL);
+        save_part_lanes(&o, s, (char)('A' + p), &s->part[p], &v, pm);
         if (o.n < len) continue;
         o.n = at;   /* the part is cut off: undone whole */
         buf[at] = 0;
@@ -3688,7 +3734,7 @@ static int load_out(int *x, const char *v, int n, int dflt) {
 enum { F_REQUIRED = 5 + SEQ_LANES, F_VOI = F_REQUIRED, F_GV, F_H, F_G, F_LK = F_G + SEQ_LANES, F_CH = F_LK + SEQ_LANES, F_SW, F_GT,
        F_DY, F_PQ, F_SL, F_CS, F_BS, F_AB, F_MR = F_AB + SEQ_LANES, F_CV, F_SCH = F_CV + SEQ_LANES, F_RK, F_MP, F_BV,
        F_FO = F_BV + SEQ_LANES, F_VX, F_RB, F_RZ, F_BRB, F_BRZ, F_BX, F_BL, F_JX, F_JW, F_JK, F_JL, F_JF, F_JY, F_JV, F_JM,
-       F_DJ, F_GN = F_DJ + DL_COUNT, F_CP, F_HO, F_LA, F_COUNT = F_LA + DL_COUNT };
+       F_DJ, F_GN = F_DJ + DL_COUNT, F_CP, F_HO, F_LA, F_PM = F_LA + DL_COUNT, F_COUNT };
 /* pq, sl, cs: 0.9, bs, ab: 0.10, when not neutral; mr: 0.11, a recipe melody; cv: 0.13, a chord rhythm's variant;
  * .ch (F_SCH): 0.14, every slot of a loop with no period of 16 or less; .rk: 0.14, the COLOUR ranks' period; mp: VST-12, a
  * recipe melody's phrasing; bv: 0.16, a generated lane's bars with their own variation; fo: after 0.16, FOLLOW off; vx: 0.17, the Chords voicing, when not a new part's;
@@ -3698,7 +3744,7 @@ enum { F_REQUIRED = 5 + SEQ_LANES, F_VOI = F_REQUIRED, F_GV, F_H, F_G, F_LK = F_
  * and the locked bars' DENSITY/RANGE/VARIATION/TIME (out_mnew), when not the defaults; 1.dj, 2.dj (F_DJ + DL_*): 0.22, a drawn lane's
  * JAM state (out_djam), once used; gn: 0.23, the genre preset last loaded, when set; cp: 0.24, the change points (out_cp), when any; ho:
  * 0.24, the hit octaves (out_hoct), when any; 1.la, 2.la (F_LA + DL_*): 0.24, a drawn lane's LOCK WITH and ANTICIPATE (out_la), when not
- * the defaults */
+ * the defaults; pm: 0.26, the parts keep their own mutes (else every part takes A's) */
 typedef struct fields { const char *v[F_COUNT]; int n[F_COUNT]; } fields_t;
 
 static void find_fields(const char *str, char letter, fields_t *f) {
@@ -3708,7 +3754,7 @@ static void find_fields(const char *str, char letter, fields_t *f) {
                                               "1.cv", "2.cv", "3.cv", "4.cv", ".ch", ".rk", "3.mp",
                                               "1.bv", "2.bv", "3.bv", "4.bv", "fo", ".vx", ".rb", ".rz", "2.rb", "2.rz", "2.bx",
                                               "2.bl", "3.jx", "3.jw", "3.jk", "3.jl", "3.jf", "3.jy", "3.jv", "3.jm",
-                                              "1.dj", "2.dj", "gn", ".cp", ".ho", "1.la", "2.la"};
+                                              "1.dj", "2.dj", "gn", ".cp", ".ho", "1.la", "2.la", "pm"};
     memset(f, 0, sizeof *f);
     for (const char *p = str; *p;) {
         const char *end = strchr(p, '|'), *eq;
@@ -4215,6 +4261,7 @@ static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, se
     out[3] = !(f.v[F_FO] && f.n[F_FO] == 1 && f.v[F_FO][0] == '0');   /* FOLLOW: off only for `fo=0`; never refuses a load */
     gn = f.v[F_GN] ? num(f.v[F_GN], f.n[F_GN]) : 0;
     out[4] = gn > 0 && gn <= SEQ_PRESETS_MAX ? gn : 0;   /* 0.23 the preset: absent or bad is none; never refuses a load */
+    out[5] = f.v[F_PM] && f.n[F_PM] == 1 && f.v[F_PM][0] == '1';   /* 0.26 per-part mutes: only `pm=1`; never refuses a load */
     return parse_part(&f, p);
 }
 
@@ -4245,7 +4292,7 @@ static int load_v1(seq_t *s, const char *str) {
     only_verse(s);
     v1_part(cur(s), pat);
     retire(cur(s));
-    for (int l = 0; l < SEQ_LANES; l++) s->mute[l] = l < SEQ_ACTIVE_LANES && str[6 + grid + l] == '1';
+    for (int l = 0; l < SEQ_LANES; l++) cur(s)->lane[l].mute = l < SEQ_ACTIVE_LANES && str[6 + grid + l] == '1';
     s->key = 4;
     s->scale = SCALE_MINOR;
     for (int l = 0; l < SEQ_LANES; l++) s->chan[l] = l + 2;
@@ -4376,11 +4423,10 @@ static void settle_loaded(seq_t *s, seq_part_t *p, int lane) {
     else settle_gen(s, p, lane);
 }
 
-/* A loaded part made ready to play: Melody 2 retired, no lane mutes (they are global), voiced, its generated lanes
- * regenerated under their locks. Here, on the load, so seq_block only ever switches to a part that is ready. */
+/* A loaded part made ready to play: Melody 2 retired, voiced, its generated lanes regenerated under their locks. Here, on
+ * the load, so seq_block only ever switches to a part that is ready. */
 static void ready_loaded(seq_t *s, seq_part_t *p) {
     retire(p);
-    for (int l = 0; l < SEQ_LANES; l++) p->lane[l].mute = 0;
     revoice(s, p);
     for (int l = 0; l < SEQ_LANES; l++) settle_loaded(s, p, l);
 }
@@ -4397,7 +4443,7 @@ static void load_other_part(seq_t *s, const char *str, int part) {
 
 /* song (0.23 seq_song_load): a csq2 state's song only, the MIDI channels and FOLLOW kept */
 static int state_load(seq_t *s, const char *str, int song) {
-    int key, scale, ch[3], out[5];   /* out: SWING, GATE, DYNAMICS, FOLLOW, 0.23 the preset */
+    int key, scale, ch[3], out[6];   /* out: SWING, GATE, DYNAMICS, FOLLOW, 0.23 the preset, 0.26 per-part mutes */
     if (!str) return 0;
     if (!strncmp(str, "csq1:", 5)) {
         if (!load_v1(s, str)) return 0;
@@ -4427,10 +4473,11 @@ static int state_load(seq_t *s, const char *str, int song) {
     only_verse(s);
     *cur(s) = s->load_tmp;
     retire(cur(s));
-    for (int l = 0; l < SEQ_LANES; l++) s->mute[l] = cur(s)->lane[l].mute;   /* A's flags are the global mutes */
     ready_loaded(s, cur(s));
     if (s->view_bar >= cur(s)->bars) s->view_bar = 0;
     for (int p = 1; p < SEQ_NPARTS; p++) load_other_part(s, str + 5, p);
+    for (int p = 1; !out[5] && p < SEQ_NPARTS; p++)   /* 0.26 a state without `pm`: A's mutes were every part's */
+        for (int l = 0; l < SEQ_LANES; l++) s->part[p].lane[l].mute = s->part[0].lane[l].mute;
     s->undo_n = 0;
     strip_clamp(s);
     s->display_rev++;
@@ -4486,7 +4533,6 @@ void seq_init_preset(seq_t *s) {
     s->scale = SCALE_MAJOR;
     s->swing = 0;
     s->gate = s->dyn = 50;
-    memset(s->mute, 0, sizeof s->mute);
     s->preset = 0;   /* 0.23 */
     only_verse(s);
     v1_default_pat(pat);
@@ -4893,8 +4939,7 @@ static int nr_walk(nr_tries_t *t) {
  * leaves the lane as it was, with no undo step. One undo step restores the style, seed, variant and steps. Every loop
  * step locked: nothing (no undo step). */
 static void new_rhythm(seq_t *s) {
-    static seq_step_t before[SEQ_LANE_STEPS];   /* setters run one at a time (the wrapper's lock); not on the audio thread */
-    static seq_snap_t over;                      /* the ring slot the snapshot overwrites, back if nothing moves */
+    seq_step_t *before = s->nr_before;   /* the instance's scratch (seq_t, not static: several instances set at once on iOS, VST-33) */
     seq_part_t *p = cur(s);
     seq_lane_t *ln = &p->lane[LANE_CHORDS];
     nr_tries_t t = {s, p, before, NEW_RHYTHM_CAP};
@@ -4911,8 +4956,8 @@ static void new_rhythm(seq_t *s) {
     act(s);
     seq_gen_t g = ln->gen;
     int top = s->undo_top, undo_n = s->undo_n;
-    memcpy(before, ln->steps, sizeof before);
-    over = s->undo[top];
+    memcpy(before, ln->steps, sizeof s->nr_before);
+    s->nr_over = s->undo[top];
     push_snap(s, LANE_CHORDS, 0);
     if (nr_variants(&t) || nr_seeds(&t, NEW_RHYTHM_SEEDS)) {
         said(s, LANE_CHORDS, "NEW RHYTHM: new variation");
@@ -4925,8 +4970,8 @@ static void new_rhythm(seq_t *s) {
         return;
     }
     ln->gen = g;   /* the cap spent, nothing moved: as it was, no undo step */
-    memcpy(ln->steps, before, sizeof before);
-    s->undo[top] = over;   /* the push undone exactly, a full ring's oldest step included */
+    memcpy(ln->steps, before, sizeof s->nr_before);
+    s->undo[top] = s->nr_over;   /* the push undone exactly, a full ring's oldest step included */
     s->undo_top = top;
     s->undo_n = undo_n;
     said(s, LANE_CHORDS, "NEW RHYTHM: nothing new here");
@@ -4959,7 +5004,9 @@ static const int RECIPE_SHAPE[5] = {BSHAPE_MOVEMENT, BSHAPE_SYNC, BSHAPE_OCTAVES
 static void restore_lane(seq_t *s, seq_part_t *p, const seq_snap_t *u) {
     seq_lane_t *ln = &p->lane[u->lane];
     int complexity = ln->gen.complexity, cx = chords_cx(p), d = dl_of(u->lane), o = DL_COUNT - 1 - d, olw = d >= 0 ? p->lw[o] : 0;
+    unsigned char mute = ln->mute;
     memcpy(ln, &u->ln, sizeof u->ln);
+    ln->mute = mute;   /* 0.26 a mute is not an edit: the lane's stays */
     if (dl_of(u->lane) >= 0) {   /* 0.18: the drawn bars; the RHYTHM knobs, like the complexity, only from RESET KNOBS's */
         memcpy(p->rb[dl_of(u->lane)], u->rb, sizeof u->rb);
         if (u->knobs == 2) memcpy(p->rk[dl_of(u->lane)], u->rk, sizeof u->rk);   /* RHYTHM's RESET KNOBS only, never CHORDS' */

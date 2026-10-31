@@ -10,11 +10,11 @@ static int fails;
 
 #define CHECK(c, ...) do { printf("%s ", (c) ? "ok  " : "FAIL"); printf(__VA_ARGS__); printf("\n"); if (!(c)) fails++; } while (0)
 
-static void no_midi(void *ctx, int status, int note, int vel) { (void)ctx, (void)status, (void)note, (void)vel; }
+static void no_midi(void *ctx, int status, int note, int vel, int frame) { (void)ctx, (void)status, (void)note, (void)vel, (void)frame; }
 
 static int held[16][128], ons;   /* note-ons minus note-offs per channel and note; note-ons logged */
-static void count_midi(void *ctx, int status, int note, int vel) {
-    (void)ctx;
+static void count_midi(void *ctx, int status, int note, int vel, int frame) {
+    (void)ctx; (void)frame;
     if ((status & 0xf0) == 0x90 && vel > 0) held[status & 15][note]++, ons++;
     else if ((status & 0xf0) == 0x80 || (status & 0xf0) == 0x90) held[status & 15][note]--;
 }

@@ -45,7 +45,7 @@ static const preset_part_t PART[SEQ_NPARTS] = {
 const preset_info_t *preset_info(int i) { return i >= 0 && i < PRESETS_COUNT ? &RECIPE[i].info : NULL; }
 const char *preset_chunk(int i) { return i >= 0 && i < PRESETS_COUNT ? PRESET_CHUNK[i] : NULL; }
 
-static void no_midi(void *ctx, int status, int note, int vel) { (void)ctx, (void)status, (void)note, (void)vel; }
+static void no_midi(void *ctx, int status, int note, int vel, int frame) { (void)ctx, (void)status, (void)note, (void)vel, (void)frame; }
 
 int preset_build(int i, char *buf, int len) {
     const genre_recipe_t *r;

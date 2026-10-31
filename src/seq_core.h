@@ -52,8 +52,10 @@ enum { BSHAPE_MOVEMENT, BSHAPE_SYNC, BSHAPE_OCTAVES, BSHAPE_REGISTER, BSHAPE_PUS
 #define LSHAPE_COUNT 9   /* a lane's SHAPE row: the larger of SHAPE_COUNT and BSHAPE_COUNT */
 _Static_assert(LSHAPE_COUNT >= SHAPE_COUNT && LSHAPE_COUNT >= BSHAPE_COUNT, "LSHAPE_COUNT holds every lane's SHAPE row");
 
-/* status is a full MIDI status byte (0x90 | channel, 0x80 | channel); vel 0 for note-offs */
-typedef void (*seq_emit_fn)(void *ctx, int status, int note, int vel);
+/* status is a full MIDI status byte (0x90 | channel, 0x80 | channel); vel 0 for note-offs. frame: the event's offset inside
+ * the host block seq_block is playing (0 .. frames - 1), for a host that places notes sample-accurately; 0 for an event sent
+ * outside a block (a setter's note-offs, seq_all_notes_off). The Force places every event at the block's start (engine.c). */
+typedef void (*seq_emit_fn)(void *ctx, int status, int note, int vel, int frame);
 
 typedef struct {
     int status_off;   /* 0x80 | channel */
@@ -105,7 +107,7 @@ typedef struct {
 
 typedef struct {
     seq_step_t steps[SEQ_LANE_STEPS];
-    unsigned char mute;   /* a loaded state's A<n> mute flag, until seq_state_load moves it to seq_t.mute (mutes are global) */
+    unsigned char mute;   /* the lane's mute in this part (a performance setting: undo leaves it); saved as the <P><n> flag */
     seq_gen_t gen;
     unsigned char lock[SEQ_LANE_STEPS / 8];   /* lock bit = hand-edited step: regeneration leaves it as it is */
     unsigned char bar_var[SEQ_MAX_BARS];      /* 0.16 (Bass, Melody 1): per bar, 0 the phrase's bar, else its own variation
@@ -400,7 +402,6 @@ typedef struct {
     int queued;                /* the part seq_block switches to at the next bar line, -1 none */
     int used_mask, stale_mask; /* bit p: part p is in use; part p missed a key or scale change (catches up when selected) */
     long part_origin_k;        /* the 16th the playing part's bar 1 began on (0 after a stop); its position counts from it */
-    unsigned char mute[SEQ_LANES];   /* lane mutes, for every part (a performance setting) */
     int unsaved_mask;          /* bit p: the last seq_state_save left part p out (seq_unsaved_parts); not saved */
     int view_bar;              /* the bar picked (0-based): the grid shows and edits it unless following (seq_grid_bar) */
     int follow;                /* 1 (the default): while playing the grid, the FIX pages and the bar strip show the playing
@@ -457,9 +458,15 @@ typedef struct {
     double move_secs;                /* seconds of playback left before move_text clears (long enough to read) */
     seq_emit_fn emit;
     void *ctx;
+    double rate;             /* the host's sample rate (seq_set_rate; 44100 until set: the Force's), for the length of a block in beats */
+    double blk_start, blk_end;   /* the interval of song positions the block being played covers (frame_of): the emit frame of an event */
+    int blk_frames, in_block;    /* its frame count; 1 while seq_block runs (an event outside one is sent at frame 0) */
     seq_part_t load_tmp;   /* seq_state_load parses here first, so a bad state changes nothing; per instance, since
                             * every plugin instance loads its own state and they must not share scratch */
     seq_part_t jam_tmp;    /* 0.22 a queued JAM block's scratch part (djq_render), per instance as load_tmp */
+    seq_step_t nr_before[SEQ_LANE_STEPS];   /* NEW RHYTHM's scratch (new_rhythm): the lane's steps before, and the undo ring slot its
+                                             * snapshot overwrites; per instance as load_tmp (VST-33: no static scratch in the core) */
+    seq_snap_t nr_over;
     unsigned gen_counter;  /* mixed into every new seed; not saved (the seeds are) */
     seq_snap_t undo[SEQ_UNDO];   /* a ring: undo_top is the next slot written, undo_n the snapshots held */
     int undo_top, undo_n;
@@ -486,8 +493,15 @@ void seq_init(seq_t *s, seq_emit_fn emit, void *ctx);
 void seq_init_preset(seq_t *s);
 void seq_reset_v1(seq_t *s);   /* the playing part back to v1's song, every lane MANUAL; clears the undo history */
 
-/* Once per host block: ppq = song position at the block start (-1 when unknown), bpm, transport playing, frame count. */
+/* Once per host block: ppq = song position at the block start (-1 when unknown), bpm, transport playing, frame count. The
+ * block plays the interval since the previous block's position, so every event is sent one block after its boundary, at
+ * the frame its position falls on within that interval (seq_emit_fn's frame). A host that wants an event in the very
+ * block it renders passes the position of the block's end instead (its first block after a start then primes with the
+ * start position; docs/IOS_ENGINE.md). */
 void seq_block(seq_t *s, double ppq, double bpm, int playing, int frames);
+/* The host's sample rate, for the beats a block of `frames` frames spans while stopped or after a jump (hz > 0; 44100 until
+ * set, the Force's). Set it before the first seq_block; a change while playing applies from the next block. */
+void seq_set_rate(seq_t *s, double hz);
 
 /* MANUAL lane: a melody re-applies its arp recipe to that bar; Chords and Bass change only the step (on: the root at
  * the lane's octave, vel 100, length 1). Generated lane: locks the step (pushing an undo snapshot) and
@@ -495,7 +509,8 @@ void seq_block(seq_t *s, double ppq, double bpm, int playing, int frames);
  * Chords lane (the step as it plays): on draws a HIT, off clears the drawn hit and its holds (none there: nothing); one
  * undo step, and the bar reads edited; an open bar or RHYTHMS browser is closed as DONE first. 0.19: a DRAWN Bass lane the same. */
 void seq_set_step(seq_t *s, int lane, int bar, int step, int on);
-void seq_set_mute(seq_t *s, int lane, int muted);   /* global: the lane stays muted in every part */
+void seq_set_mute(seq_t *s, int lane, int muted);   /* the playing part's: each part keeps its own (0.26) */
+int  seq_mute(const seq_t *s, int lane);              /* 1 if the lane is muted in the playing part */
 void seq_set_channel(seq_t *s, int lane, int ch);   /* 1-16, else ignored; the lane's held notes end on the old channel first */
 int seq_channel_of(const seq_t *s, int lane);
 /* The output stage, 0..100 each, else ignored. SWING delays odd 16ths by up to a triplet (1/12 beat at 100); GATE scales
@@ -534,7 +549,8 @@ void seq_set_voicing(seq_t *s, int v);          /* VOICING_CLOSE / VOICING_SMOOT
 void seq_set_vmode(seq_t *s, int mode);         /* 0.17: VMODE_*; else ignored. Keeps `voicing` in step */
 void seq_all_notes_off(seq_t *s);
 
-/* Parts. A part is in use once selected or queued; its first use makes it a copy of the Verse. Stopped, a selection
+/* Parts. A part is in use once selected or queued; its first use makes it a copy of the Verse (0.26: its mutes too; each
+ * part keeps its own, and a lane the starting part mutes goes silent at its bar line). Stopped, a selection
  * switches at once; playing, it queues the part, which starts from its own bar 1 at the playing part's next bar line
  * (held notes end first). Selecting the queued part, or the playing one, cancels the queue; a stop starts a queued part
  * at once. Key and scale changes regenerate the playing and the queued part; the others catch up in this call. */
@@ -631,8 +647,9 @@ int seq_part_step_notes(const seq_t *s, int part, int lane, int bar, int step, i
 
 /* Every part in use, its steps and the key as text, for the plugin state saved with the MPC project (< SEQ_STATE_MAX):
  * the Verse as part A (all that 0.3-0.7 read), the others as B-F, each whole or left out when it does not fit.
- * A load plays the Verse from the song position, the saved parts in use and ready, the rest unused, the mutes from A's
- * flags; a part B-F with a missing or bad field loads as unused. 0.9's per-part `.pq`, `.sl` and `.cs` and 0.10's `2.bs`
+ * A load plays the Verse from the song position, the saved parts in use and ready, the rest unused, each part's mutes from
+ * its <P><n> flags (0.26: `pm=1` when the parts' mutes differ; a state without it gives every part A's, as the global mutes
+ * before 0.26 played); a part B-F with a missing or bad field loads as unused. 0.9's per-part `.pq`, `.sl` and `.cs` and 0.10's `2.bs`
  * and `<n>.ab` are written only when not neutral and never refuse a load (a bad one loads neutral).
  * 0.14: a part's `.prog`, `.pq` and `.sl` hold the loop's phrase (seq_part_t.phrase slots, as 0.13 wrote its progression;
  * a 0.13 project saves back byte for byte); a loop with no period of 16 or less writes its first 16 slots there (0.13

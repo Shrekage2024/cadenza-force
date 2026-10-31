@@ -25,8 +25,8 @@ static double ev_ppq;
 
 #define CHECK(c, ...) do { printf("%s ", (c) ? "ok  " : "FAIL"); printf(__VA_ARGS__); printf("\n"); if (!(c)) fails++; } while (0)
 
-static void emit(void *ctx, int status, int note, int vel) {
-    (void)ctx;
+static void emit(void *ctx, int status, int note, int vel, int frame) {
+    (void)ctx; (void)frame;
     if (nev < MAXEV) evs[nev++] = (ev_t){status, note, vel, ev_seq ? (int)ev_seq->cur_k : -1, ev_ppq, ev_seq ? ev_seq->cur_part : -1};
 }
 
@@ -273,7 +273,7 @@ static int same_part(const seq_t *a, const seq_t *b) {
     const seq_part_t *p = &a->part[0], *q = &b->part[0];
     if (p->bars != q->bars || p->chord_len != q->chord_len) return 0;
     for (int l = 0; l < SEQ_ACTIVE_LANES; l++) {   /* Melody 2 is retired and empty */
-        if (a->mute[l] != b->mute[l]) return 0;
+        if (p->lane[l].mute != q->lane[l].mute) return 0;
         int conv = l == LANE_CHORDS ? chords_loaded_as(&p->lane[l], &q->lane[l], p->bars)   /* 0.18: a 0.17 lane converted */
                    : l == LANE_BASS ? bass_loaded_as(&p->lane[l], &q->lane[l], p->bars) : -1;   /* 0.19: a 0.18 lane */
         if (conv >= 0) {
@@ -1125,7 +1125,7 @@ static void test_gen_undo(void) {
     CHECK(seq_can_undo(&s) && !same_steps(&s, LANE_BASS, &lane[0]) && lane_is_gen(&s, LANE_BASS), "GEN pushes and makes new notes");
     seq_set_mute(&s, LANE_BASS, 1);
     seq_undo(&s);
-    CHECK(!seq_can_undo(&s) && s.mute[LANE_BASS], "undo keeps the lane's mute");
+    CHECK(!seq_can_undo(&s) && seq_mute(&s, LANE_BASS), "undo keeps the lane's mute");
     seq_set_mute(&s, LANE_BASS, 0);
     CHECK(same_lane(&s, LANE_BASS, &lane[0]), "GEN then UNDO restores the previous lane exactly");
     for (int i = 1; i <= 10; i++) {
@@ -1624,7 +1624,7 @@ static void longest_fields(seq_t *s) {
     seq_state_load(s, "csq2|k=11|s=3|A.len=16|A.cl=32|A.h=100,65535|A.prog=0123456012345601|A1=0:|A2=0:|A3=0:|A4=0:");
     for (int l = 0; l < SEQ_LANES; l++) {
         s->part[0].lane[l].gen.seed = 65535;
-        s->mute[l] = 1;
+        s->part[0].lane[l].mute = 1;
         seq_set_complexity(s, l, 100);
     }
     for (int p = SEQ_NPARTS - 1; p >= 0; p--) {
@@ -2410,27 +2410,66 @@ static void test_part_used_mask(void) {
           seq_part_used(&s, 2) && seq_part_used(&s, 5) && !seq_part_used(&s, 1), "a load plays the Verse, the saved parts in use");
 }
 
-static void test_mutes_are_global(void) {
-    static seq_t s;
+/* 0.26 note-ons on channel ch logged from `from` while part `part` played */
+static int ons_in(int from, int ch, int part) {
+    int n = 0;
+    for (int i = from; i < nev; i++) n += is_on(&evs[i]) && (evs[i].status & 15) == ch - 1 && evs[i].part == part;
+    return n;
+}
+
+/* 0.26 each part keeps its own mutes: a first use copies the Verse's, a switch brings the new part's in (at the bar line
+ * when queued), undo and an unmute elsewhere leave them, a save keeps them (`pm=1`), and a state without `pm` gives every
+ * part A's, as the global mutes before 0.26 played */
+static void test_mutes_per_part(void) {
+    static seq_t s, t;
     static char buf[SEQ_STATE_MAX];
     fresh(&s, 0);
     seq_set_mute(&s, LANE_BASS, 1);
     seq_select_part(&s, 3);
-    play(&s, 0, 8.0, 0);
-    seq_block(&s, 8.0, bpm, 0, 128);
-    CHECK(count_on(3) == 0 && count_on(2) > 0 && s.mute[LANE_BASS], "Bass muted in the Verse stays muted in the Chorus");
+    CHECK(seq_mute(&s, LANE_BASS) && s.part[3].lane[LANE_BASS].mute, "a first use copies the Verse's mutes");
     seq_set_mute(&s, LANE_BASS, 0);
+    CHECK(!seq_mute(&s, LANE_BASS) && s.part[0].lane[LANE_BASS].mute, "unmuted in the Chorus, the Verse keeps it muted");
+    seq_select_part(&s, 0);
+    CHECK(seq_mute(&s, LANE_BASS), "back in the Verse, the Bass is muted");
+    seq_select_part(&s, 3);
+    CHECK(!seq_mute(&s, LANE_BASS), "and in the Chorus not");
     seq_select_part(&s, 0);
     nev = 0;
-    play(&s, 0, 4.0, 0);
-    seq_block(&s, 4.0, bpm, 0, 128);
-    CHECK(count_on(3) == 2, "unmuted in the Chorus, it plays in the Verse (%d in a bar)", count_on(3));
-    seq_set_mute(&s, LANE_MEL_UP, 1);
-    CHECK(seq_state_save(&s, buf, sizeof buf) && strstr(buf, "|A2=0:") && strstr(buf, "|A3=1:"), "a save writes the mutes as A<n>");
+    double ppq = play(&s, 0, 9.5, 0);
     seq_select_part(&s, 3);
+    ev_seq = &s;
+    play_to(&s, &ppq, 12.0);
+    CHECK(seq_part(&s) == 0 && ons_in(0, 3, 0) == 0 && count_on(2) > 0, "playing the Verse: no Bass (%d), Chords play",
+          ons_in(0, 3, 0));
+    play_to(&s, &ppq, 16.0);
+    int from = nev;
+    CHECK(seq_part(&s) == 3 && ons_in(0, 3, 3) > 0, "the queued Chorus starts at the bar line with its Bass (%d)", ons_in(0, 3, 3));
+    seq_set_mute(&s, LANE_MEL_UP, 1);
+    seq_select_part(&s, 0);
+    play_to(&s, &ppq, 24.0);
+    CHECK(seq_part(&s) == 0 && seq_mute(&s, LANE_BASS) && !seq_mute(&s, LANE_MEL_UP) && ons_in(from, 3, 0) == 0,
+          "the Verse back at its bar line: Bass muted again, Melody 1 (muted in the Chorus) not");
+    seq_block(&s, ppq, bpm, 0, 128);
+    ev_seq = NULL;
+    CHECK(balanced(), "no stuck notes across the switches");
+    seq_generate(&s, LANE_BASS);
+    seq_set_mute(&s, LANE_BASS, 0);
+    seq_undo(&s);
+    CHECK(!seq_mute(&s, LANE_BASS), "undo leaves the mute");
+    seq_set_mute(&s, LANE_BASS, 1);
+    CHECK(seq_state_save(&s, buf, sizeof buf) && strstr(buf, "|pm=1|") && strstr(buf, "|A2=1:") && strstr(buf, "|D2=0:") &&
+          strstr(buf, "|A3=0:") && strstr(buf, "|D3=1:"), "a save writes each part's mutes, and pm=1");
+    seq_init(&t, emit, NULL);
+    CHECK(seq_state_load(&t, buf) && seq_mute(&t, LANE_BASS) && !seq_mute(&t, LANE_MEL_UP) && !t.part[3].lane[LANE_BASS].mute &&
+          t.part[3].lane[LANE_MEL_UP].mute, "a load gives each part its own");
+    CHECK(resaves_same(&t), "and saves back the same");
+    seq_select_part(&s, 3);
+    seq_set_mute(&s, LANE_BASS, 1);
     seq_set_mute(&s, LANE_MEL_UP, 0);
-    CHECK(seq_state_load(&s, buf) && s.mute[LANE_MEL_UP] && !s.mute[LANE_BASS] && !s.part[0].lane[LANE_MEL_UP].mute,
-          "a load sets the global mutes from its flags");
+    CHECK(seq_state_save(&s, buf, sizeof buf) && !strstr(buf, "|pm=") && strstr(buf, "|A2=1:") && strstr(buf, "|D2=0:"),
+          "the parts' mutes alike: no pm, B-F write 0, as 0.25 saved");
+    CHECK(seq_state_load(&t, buf) && t.part[3].lane[LANE_BASS].mute && t.part[0].lane[LANE_BASS].mute,
+          "a state without pm: every part takes A's mutes");
 }
 
 /* key and scale changes regenerate the playing part (and a queued one); the others catch up when next selected */
@@ -2515,7 +2554,7 @@ static int same_part_at(const seq_t *a, int pa, const seq_t *b, int pb) {
 }
 
 /* three parts in use: the Verse, an Intro (2 bars, 1/2-bar chords, new seeds, a lock, a Manual Melody 1 with notes) and a
- * Chorus (another progression, close voicing, a new Bass seed); Bass muted (global) */
+ * Chorus (another progression, close voicing, a new Bass seed); Bass muted in all three (0.26: as 0.8's global mute) */
 static void three_parts(seq_t *s) {
     static const int V1[4] = {0, 5, 2, 6};
     seq_init(s, emit, NULL);
@@ -2536,6 +2575,7 @@ static void three_parts(seq_t *s) {
     seq_generate(s, LANE_BASS);
     seq_select_part(s, 0);
     seq_set_mute(s, LANE_BASS, 1);
+    s->part[1].lane[LANE_BASS].mute = s->part[3].lane[LANE_BASS].mute = 1;
 }
 
 static void test_state_parts_round_trip(void) {
@@ -2547,7 +2587,7 @@ static void test_state_parts_round_trip(void) {
     CHECK(n > 0 && b && d && b < d && strstr(buf, "|A2=1:") && strstr(buf, "|B2=0:") && strstr(buf, "|D2=0:") &&
           strstr(buf, "|B2.lk=") && strstr(buf, "|B.voi=1") && strstr(buf, "|D.voi=0") && !strstr(buf, "|C.") &&
           !strstr(buf, "|E.") && !strstr(buf, "|F.") && !seq_unsaved_parts(&s),
-          "the parts in use save as A, B, D; B-F lanes write mute 0; nothing left out (%d bytes)", n);
+          "the parts in use save as A, B, D; B-F lanes write mute 0 (0.26: the parts' mutes alike); nothing left out (%d bytes)", n);
     seq_init(&t, emit, NULL);
     CHECK(seq_state_load(&t, buf), "and load");
     CHECK(seq_part_used(&t, 0) && seq_part_used(&t, 1) && !seq_part_used(&t, 2) && seq_part_used(&t, 3) &&
@@ -2555,7 +2595,8 @@ static void test_state_parts_round_trip(void) {
           "the Verse plays, Intro and Chorus in use, the rest unused");
     CHECK(same_part_at(&s, 0, &t, 0) && same_part_at(&s, 1, &t, 1) && same_part_at(&s, 3, &t, 3),
           "every part loads back: steps, recipes, locks, progression, voicing");
-    CHECK(t.mute[LANE_BASS] && !t.mute[LANE_CHORDS] && !t.part[1].lane[LANE_BASS].mute, "the mutes stay global");
+    CHECK(!strstr(buf, "|pm=") && seq_mute(&t, LANE_BASS) && !seq_mute(&t, LANE_CHORDS) && t.part[1].lane[LANE_BASS].mute &&
+          t.part[3].lane[LANE_BASS].mute, "0.26 every part takes A's mutes (no pm)");
     CHECK(resaves_same(&t), "save -> load -> save gives the same string (0.18: once loaded, the Chords lanes DRAWN bars)");
     seq_select_part(&t, 1);
     CHECK(seq_part(&t) == 1 && same_part_at(&s, 1, &t, 1), "a loaded part plays as saved, no first-use copy of the Verse");
@@ -2571,7 +2612,7 @@ static void test_state_07_is_verse(void) {
     CHECK(seq_state_load(&s, S07), "a 0.7 state loads");
     int others = 0;
     for (int p = 1; p < SEQ_NPARTS; p++) others += seq_part_used(&s, p);
-    CHECK(seq_part(&s) == 0 && !others && s.mute[LANE_BASS] && !s.mute[LANE_CHORDS], "as the Verse, nothing else in use, A2's mute global");
+    CHECK(seq_part(&s) == 0 && !others && seq_mute(&s, LANE_BASS) && !seq_mute(&s, LANE_CHORDS), "as the Verse, nothing else in use, A2's mute the Verse's");
     CHECK(saves_but_drawn(&s, S07), "and saves back byte for byte (0.18: but its Chords lane, as DRAWN bars)");
 }
 
@@ -5803,7 +5844,7 @@ static void test_15_init_preset(void) {
           seq_voicing(&s) == VOICING_CLOSE && s.cur_part == 0 && s.used_mask == 1 && s.undo_n == 0,
           "INIT: C major, 4 bars of 1-bar chords, close voicing, the Verse alone, no undo");
     CHECK(seq_prog_preset(&s) == 1, "INIT plays the 1-5-6-4 Pop progression (preset %d)", seq_prog_preset(&s));
-    CHECK(seq_channel_of(&s, LANE_BASS) == 7 && !s.mute[LANE_MEL_UP], "INIT keeps the channels and clears the mutes");
+    CHECK(seq_channel_of(&s, LANE_BASS) == 7 && !seq_mute(&s, LANE_MEL_UP), "INIT keeps the channels and clears the mutes");
     CHECK(s.part[0].lane[LANE_MEL_UP].gen.style == GEN_MEL_JAM && s.part[0].mjam.set.c == MJ_ARP && s.part[0].mjam.set.l == 0 &&
           s.part[0].mjam.set.form == MF_LOOP && s.part[0].mjam.set.cad == 3, "INIT's melody is JAM ARP UP, LOOP, CADENCE HOME (0.20)");
     nev = 0;
@@ -9684,7 +9725,7 @@ static void test_20_tap_fix(void) {
 
 /* 0.20 Task 4: JAM blocks switch in time at the SWITCH AT boundary */
 
-static void quiet(void *ctx, int status, int note, int vel) { (void)ctx, (void)status, (void)note, (void)vel; }
+static void quiet(void *ctx, int status, int note, int vel, int frame) { (void)ctx, (void)status, (void)note, (void)vel, (void)frame; }
 
 /* plays 128-frame blocks from `ppq` (a start first, when stopped) until step k - 1 has fired; returns the position reached */
 static double play_to_k(seq_t *s, double ppq, long k) {
@@ -15327,8 +15368,8 @@ static int pin_rec, pin_blk;
 static void pin_mix(int v) {
     for (int i = 0; i < 4; i++) pin_h = (pin_h ^ (uint32_t)((v >> (8 * i)) & 0xff)) * 16777619u;
 }
-static void pin_emit(void *ctx, int status, int note, int vel) {
-    (void)ctx;
+static void pin_emit(void *ctx, int status, int note, int vel, int frame) {
+    (void)ctx; (void)frame;
     if (pin_rec) pin_mix(status), pin_mix(note), pin_mix(vel), pin_mix(pin_blk);
 }
 static uint32_t pin_text(const char *c) {
@@ -15989,7 +16030,7 @@ int main(void) {
     test_part_cancel_and_stopped_select();
     test_part_first_use_copies_verse();
     test_part_used_mask();
-    test_mutes_are_global();
+    test_mutes_per_part();
     test_lazy_regen_on_key_change();
     test_undo_across_parts();
     test_state_parts_round_trip();

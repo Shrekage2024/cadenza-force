@@ -405,5 +405,26 @@
    "kept on the Force: CS Test 0-25-0 and CS Test 0-24-1 (2 test projects)"
   ],
   "result": "pass"
+ },
+ {
+  "version": "0.26.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-10-30",
+  "includes": "VST-52: each song part keeps its own lane mutes (a lane-name tap mutes the playing part's lane only; a queued part brings its mutes in at its bar line; a first use copies the Verse's; UNDO leaves mutes; pm=1 in the saved state when the parts' mutes differ, older projects load with A's mutes on every part); skin unchanged",
+  "checks": [
+   "bench before install (nothing installed): p99 42.1%, worst block 58.7% (rerun 41.7 / 58.3; 0.25.0 read 39.9 / 55.5; budget 49 / 80; toolchain verdict FAIL from its q-link sweep, as since 0.24)",
+   "install: tools/deploy.sh of dist/Cadenza-0.26.0-mpc-armv7.zip over the installed Cadenza; installed .so matches the package (md5 8f5dc1be...); filmstrip cache of earlier starts cleaned",
+   "fresh project CS Test 0-26-0, saved to [User] Force Documents/Projects (/media/az01-internal-sd; the save dialog would not take SSD): Cadenza on Plugin 001 (replacing the template's Hype), 16-bar clip in scene 1; no synth tracks: every 'by ear' check is a capture of the Cadenza ALSA port (arecordmidi, 137:0), channels Chords 1, Bass 2, Melody 3",
+   "stopped: Bass muted in the Verse; the Chorus's first use shows Bass muted (copied); Bass unmuted and Melody muted in the Chorus; Verse shows Bass muted / Melody on, Chorus Bass on / Melody muted, each time it is picked (lane-name tiles sampled from screenshots)",
+   "playing at 128 BPM, MIDI captured 40 s: the Chorus sends Chords and Bass, no Melody; the Verse queued at 9.2 s takes over at the next bar line (10.35 s) with Chords and Melody, no Bass; the Chorus queued at 24.8 s takes over at its bar line with Bass back and Melody silent; tiles match while playing",
+   "every tab opens while playing: PLAY, CHORDS JAM, BASS JAM, MELODY JAM, GLOBAL, CHORDS PHRASE",
+   "save: the project's plugin state decodes to csq2 with |pm=1, A2=1 (Verse Bass muted), D3=1 (Chorus Melody muted)",
+   "full Force restart (reboot over SSH), project reopened from the Browser: Cadenza opens on the Verse with Bass muted, the Chorus with Bass on and Melody muted; playing capture again: Verse at bar line 10.35 s Chords + Melody, no Bass; Chorus at bar line 23.47 s Chords + Bass, no Melody",
+   "UI cost at 160 BPM (2-minute soaks, 10 s): closed 5.4%, PLAY open 6.5% (+1.1), CHORDS PHRASE open 8.3% (+2.9; budget 35); vst/ui_cost.json; tests/budget.sh BUDGET OK",
+   "soak 12 minutes, 30 s interval, PLAY page open, playing at 160 BPM: MPC RSS 651664 -> 651664 kB, filmstrips 238968 -> 238968 kB, main thread 6.7%, 0 log lines mentioning errors; Cadenza MIDI still flowing at the end (vst/soak.txt)",
+   "kept on the Force: CS Test 0-26-0 (the only test project; for the owner's verification of VST-52)"
+  ],
+  "result": "pass"
  }
 ]
