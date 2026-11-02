@@ -1642,6 +1642,8 @@ static void refresh(seq_t *s, int part) {
 static void others_follow(seq_t *s) {
     s->stale_mask |= s->used_mask & ~(1 << s->cur_part);
     if (s->queued >= 0) refresh(s, s->queued);
+    for (int i = 0; i < s->arr.n; i++)   /* 0.27 and every part of the song: seq_block switches to them on its own */
+        if (s->stale_mask >> s->arr.row[i].part & 1) refresh(s, s->arr.row[i].part);
 }
 
 /* 0.20 the part's Melody lane JAM at level 1 with GATE 50 (new instances, INIT); its melody state as mjam_init left it */
@@ -1656,11 +1658,19 @@ static void retire(seq_part_t *p) {
     p->lane[LANE_MEL_DOWN].gen = MANUAL_GEN;
 }
 
+/* 0.27 no song: every arrangement rule off */
+static void arr_clear(seq_arr_t *a) {
+    memset(a, 0, sizeof *a);
+    a->cur = a->jump = a->edit = a->next_row = -1;
+    a->follow = 1;
+}
+
 void seq_init(seq_t *s, seq_emit_fn emit, void *ctx) {
     unsigned char pat[SEQ_LANES][SEQ_STEPS];
     rhythm_init();
     level_table_init();
     memset(s, 0, sizeof *s);
+    arr_clear(&s->arr);
     s->emit = emit;
     s->ctx = ctx;
     s->rate = 44100.0;
@@ -2734,6 +2744,78 @@ static long first_k_at(const seq_t *s, double ppq) {
     return s->swing && ((k - 1) & 1) && step_time(s, k - 1) >= ppq - EPS ? k - 1 : k;
 }
 
+/* A lane of the playing part muted or heard, no setter's bookkeeping (0.27: the audio thread applies a row's mutes) */
+static void mute_lane(seq_t *s, int lane, int muted) {
+    cur(s)->lane[lane].mute = muted ? 1 : 0;
+    if (!muted) return;
+    if (lane == LANE_CHORDS) memset(&s->keys, 0, sizeof s->keys);
+    release_where(s, -INFINITY, 0x80 | (seq_channel(s, lane) - 1));   /* the sequence keeps running; only its sound stops */
+    drop_strum(s, lane, -INFINITY);
+    if (dl_of(lane) >= 0) s->hum[dl_of(lane)].on = 0;   /* and HUMANIZE's waiting hit */
+}
+
+/* 0.27 the playing row is the playing part's (its mutes are the part's). 0.27.1 a row Edit mode holds too: it plays its own mutes */
+static int arr_playing_row(const seq_t *s) {
+    const seq_arr_t *a = &s->arr;
+    return a->n && a->cur >= 0 && a->row[a->cur].part == s->cur_part;
+}
+
+/* 0.27 the playing part takes mute mask m (bit lane) */
+static void arr_mutes(seq_t *s, int m) {
+    for (int l = 0; l < SEQ_ACTIVE_LANES; l++)
+        if (cur(s)->lane[l].mute != (m >> l & 1)) mute_lane(s, l, m >> l & 1);
+}
+
+static void switch_part(seq_t *s, long origin_k);
+
+/* 0.27 row `row` starts at step k: its part from its bar 1 (a switch, or the same part counted from k), then its mutes */
+static void arr_start(seq_t *s, int row, long k) {
+    seq_arr_t *a = &s->arr;
+    int part = a->row[row].part;
+    if (part != s->cur_part) {
+        s->queued = part;   /* ready since seq_arr_set (ready_part) */
+        switch_part(s, k);
+    } else {
+        s->part_origin_k = k;
+        a->fresh = 1;
+    }
+    a->cur = row;
+    a->pass = 0;
+    arr_mutes(s, a->row[row].mute);   /* 0.27.1 Edit mode too: the held row sounds as it does in the song */
+}
+
+/* 0.27 a part button's queued part took over: the playing row is the one seq_select_part picked (next_row: SEQ_ARR_MAX the song
+ * lacks the part) */
+static void arr_selected(seq_t *s) {
+    seq_arr_t *a = &s->arr;
+    if (a->next_row < 0) return;
+    a->cur = a->next_row < a->n ? a->next_row : -1;
+    a->pass = 0;
+    a->next_row = -1;
+}
+
+/* 0.27 the arrangement at step k, before it fires (the audio thread: indices and mute bytes only). A pass of the playing part ends
+ * at every loop boundary after its bar 1; at the end of the row's last pass, following and not held, the next row starts (the
+ * first after the last; row 0 when the playing row was removed) */
+static void arr_step(seq_t *s, long k) {
+    seq_arr_t *a = &s->arr;
+    int first = a->fresh && k == s->part_origin_k;   /* the row's (the part's) first step: no pass ended. A host loop that wraps
+                                                      * onto it later ends one (final review: the song stuck on the row) */
+    a->fresh = 0;
+    if (!a->n || first) return;
+    if (a->jump >= 0 && !floor_mod(k - s->part_origin_k, SEQ_STEPS)) {   /* a jump at the bar line */
+        int row = a->jump;
+        a->jump = -1;
+        arr_start(s, row, k);
+        return;
+    }
+    if (floor_mod(k - s->part_origin_k, cur(s)->bars * SEQ_STEPS)) return;
+    a->pass++;
+    if (!a->follow || a->edit >= 0) return;
+    if (a->cur < 0) arr_start(s, 0, k);
+    else if (a->pass >= a->row[a->cur].passes) arr_start(s, (a->cur + 1) % a->n, k);
+}
+
 /* The queued part takes over (its catch-up ran when it was queued): only indices change here, on the audio thread. */
 static void switch_part(seq_t *s, long origin_k) {
     release_all(s);   /* as a loop wrap does */
@@ -2743,6 +2825,7 @@ static void switch_part(seq_t *s, long origin_k) {
     djq_drop_all(s);   /* 0.22: and the drawn lanes' */
     s->move_text[0] = 0;   /* the old part's move feedback does not carry over */
     s->part_origin_k = origin_k;
+    s->arr.fresh = 1;   /* 0.27 its first step is not a pass end */
     if (cur(s)->lane[LANE_CHORDS].mute) memset(&s->keys, 0, sizeof s->keys);   /* 0.26 the mutes are the new part's */
     if (s->txn.kind) s->txn.stale = 1;   /* 0.17: an open picker or browser is the old part's: the next setter cancels it */
     paging_off(s);   /* and a paging pause ends (ruling 18) */
@@ -2786,7 +2869,15 @@ static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
             s->idle_ppq = 0;
             s->playing = 0;
             s->cur_k = -1;
-            if (s->queued >= 0) switch_part(s, 0);   /* as a tap while stopped would */
+            if (s->arr.jump >= 0) {   /* 0.27 a song's jump too */
+                int row = s->arr.jump;
+                s->arr.jump = -1;
+                arr_start(s, row, 0);
+            }
+            if (s->queued >= 0) {   /* as a tap while stopped would */
+                switch_part(s, 0);
+                arr_selected(s);
+            }
             if (s->mjq_c >= 0) mel_commit(s);         /* 0.20: a queued JAM block too (a part switch dropped it) */
             for (int d = 0; d < DL_COUNT; d++)
                 if (s->djq[d].c >= 0) djq_commit(s, d);   /* 0.22: and the drawn lanes' */
@@ -2800,6 +2891,7 @@ static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
         s->playing = 1;
         s->part_origin_k = kp - floor_mod(kp, SEQ_STEPS);   /* 0.16: the part's bar 1 is the MPC bar the start is in (a
                                                              * clip launch or PLAY starts the plugin's loop, not the song's) */
+        s->arr.fresh = 1;   /* 0.27 */
         forget_pushes(s);
         for (int i = 0; i < s->npending; i++) s->pending[i].off_ppq += ppq - s->idle_ppq;   /* auditions: onto the song clock */
         s->idle_ppq = 0;
@@ -2832,7 +2924,11 @@ static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
         long k = s->next_k++;
         hum_due(s, step_time(s, k));   /* 0.18: HUMANIZE's waiting hit, then */
         strum_due(s, step_time(s, k));   /* the last chord's strum before this step (and before a switch drops it) */
-        if (s->queued >= 0 && floor_mod(k - s->part_origin_k, SEQ_STEPS) == 0) switch_part(s, k);   /* a bar line */
+        arr_step(s, k);   /* 0.27 the song's next row at a pass end */
+        if (s->queued >= 0 && floor_mod(k - s->part_origin_k, SEQ_STEPS) == 0) {   /* a bar line */
+            switch_part(s, k);
+            arr_selected(s);
+        }
         if (mel_switch_due(s, k)) mel_commit(s);   /* 0.20: a queued JAM block at its SWITCH AT boundary (after a part switch's drop) */
         for (int d = 0; d < DL_COUNT; d++)
             if (djq_due(s, d, k)) {   /* 0.22: the drawn lanes' each at its own */
@@ -3081,14 +3177,12 @@ int seq_mel_poll(seq_t *s) {
 }
 
 void seq_set_mute(seq_t *s, int lane, int muted) {
+    seq_arr_t *a = &s->arr;
     if (lane < 0 || lane >= SEQ_ACTIVE_LANES) return;
     if (cur(s)->lane[lane].mute != (muted ? 1 : 0)) act(s);
-    cur(s)->lane[lane].mute = muted ? 1 : 0;
-    if (!muted) return;
-    if (lane == LANE_CHORDS) memset(&s->keys, 0, sizeof s->keys);
-    release_where(s, -INFINITY, 0x80 | (seq_channel(s, lane) - 1));   /* the sequence keeps running; only its sound stops */
-    drop_strum(s, lane, -INFINITY);
-    if (dl_of(lane) >= 0) s->hum[dl_of(lane)].on = 0;   /* and HUMANIZE's waiting hit */
+    if (arr_playing_row(s))   /* 0.27 the playing row's mute too */
+        a->row[a->cur].mute = (unsigned char)((a->row[a->cur].mute & ~(1 << lane)) | (muted ? 1 << lane : 0));
+    mute_lane(s, lane, muted);
 }
 
 int seq_mute(const seq_t *s, int lane) { return lane >= 0 && lane < SEQ_ACTIVE_LANES && ccur(s)->lane[lane].mute; }
@@ -3129,6 +3223,8 @@ static void repeat_rbars(seq_part_t *p, int lane, int from, int to, int bars) {
     }
 }
 
+static void arr_clamp(seq_t *s);
+
 void seq_set_bars(seq_t *s, int bars) {
     seq_part_t *p = cur(s);
     if ((bars != 1 && bars != 2 && bars != 4 && bars != 8 && bars != 16) || bars == p->bars) return;
@@ -3153,6 +3249,7 @@ void seq_set_bars(seq_t *s, int bars) {
     strip_clamp(s);
     revoice(s, p);
     regen_part(s, p);
+    arr_clamp(s);   /* 0.27 its song rows at most 64 bars */
 }
 
 /* 0.14: the slots remapped by time, one undo step (its snapshot holds the length) */
@@ -3585,6 +3682,10 @@ static int save_state(seq_t *s, char *buf, int len) {
     if (s->preset) outf(&o, "|gn=%d", s->preset);   /* 0.23 only when set: a state without a preset saves as 0.22 did */
     int pm = mutes_differ(s);
     if (pm) outf(&o, "|pm=1");   /* 0.26 only then: a state whose parts share the Verse's mutes saves as 0.25 did */
+    if (s->arr.n) {   /* 0.27 the arrangement, only when there is one: follow, then part, passes, mute in 2 hex digits each a row */
+        outf(&o, "|ar=%d,", s->arr.follow);
+        for (int i = 0; i < s->arr.n; i++) outf(&o, "%02x%02x%02x", s->arr.row[i].part, s->arr.row[i].passes, s->arr.row[i].mute);
+    }
     save_part_lanes(&o, s, 'A', &s->part[0], &v, 1);
     if (o.n >= len) {
         s->unsaved_mask = s->used_mask;
@@ -3734,7 +3835,7 @@ static int load_out(int *x, const char *v, int n, int dflt) {
 enum { F_REQUIRED = 5 + SEQ_LANES, F_VOI = F_REQUIRED, F_GV, F_H, F_G, F_LK = F_G + SEQ_LANES, F_CH = F_LK + SEQ_LANES, F_SW, F_GT,
        F_DY, F_PQ, F_SL, F_CS, F_BS, F_AB, F_MR = F_AB + SEQ_LANES, F_CV, F_SCH = F_CV + SEQ_LANES, F_RK, F_MP, F_BV,
        F_FO = F_BV + SEQ_LANES, F_VX, F_RB, F_RZ, F_BRB, F_BRZ, F_BX, F_BL, F_JX, F_JW, F_JK, F_JL, F_JF, F_JY, F_JV, F_JM,
-       F_DJ, F_GN = F_DJ + DL_COUNT, F_CP, F_HO, F_LA, F_PM = F_LA + DL_COUNT, F_COUNT };
+       F_DJ, F_GN = F_DJ + DL_COUNT, F_CP, F_HO, F_LA, F_PM = F_LA + DL_COUNT, F_AR, F_COUNT };
 /* pq, sl, cs: 0.9, bs, ab: 0.10, when not neutral; mr: 0.11, a recipe melody; cv: 0.13, a chord rhythm's variant;
  * .ch (F_SCH): 0.14, every slot of a loop with no period of 16 or less; .rk: 0.14, the COLOUR ranks' period; mp: VST-12, a
  * recipe melody's phrasing; bv: 0.16, a generated lane's bars with their own variation; fo: after 0.16, FOLLOW off; vx: 0.17, the Chords voicing, when not a new part's;
@@ -3744,7 +3845,7 @@ enum { F_REQUIRED = 5 + SEQ_LANES, F_VOI = F_REQUIRED, F_GV, F_H, F_G, F_LK = F_
  * and the locked bars' DENSITY/RANGE/VARIATION/TIME (out_mnew), when not the defaults; 1.dj, 2.dj (F_DJ + DL_*): 0.22, a drawn lane's
  * JAM state (out_djam), once used; gn: 0.23, the genre preset last loaded, when set; cp: 0.24, the change points (out_cp), when any; ho:
  * 0.24, the hit octaves (out_hoct), when any; 1.la, 2.la (F_LA + DL_*): 0.24, a drawn lane's LOCK WITH and ANTICIPATE (out_la), when not
- * the defaults; pm: 0.26, the parts keep their own mutes (else every part takes A's) */
+ * the defaults; pm: 0.26, the parts keep their own mutes (else every part takes A's); ar: 0.27, the arrangement (load_ar) */
 typedef struct fields { const char *v[F_COUNT]; int n[F_COUNT]; } fields_t;
 
 static void find_fields(const char *str, char letter, fields_t *f) {
@@ -3754,7 +3855,7 @@ static void find_fields(const char *str, char letter, fields_t *f) {
                                               "1.cv", "2.cv", "3.cv", "4.cv", ".ch", ".rk", "3.mp",
                                               "1.bv", "2.bv", "3.bv", "4.bv", "fo", ".vx", ".rb", ".rz", "2.rb", "2.rz", "2.bx",
                                               "2.bl", "3.jx", "3.jw", "3.jk", "3.jl", "3.jf", "3.jy", "3.jv", "3.jm",
-                                              "1.dj", "2.dj", "gn", ".cp", ".ho", "1.la", "2.la", "pm"};
+                                              "1.dj", "2.dj", "gn", ".cp", ".ho", "1.la", "2.la", "pm", "ar"};
     memset(f, 0, sizeof *f);
     for (const char *p = str; *p;) {
         const char *end = strchr(p, '|'), *eq;
@@ -4244,8 +4345,25 @@ static int parse_part(const fields_t *f, seq_part_t *p) {
     return 1;
 }
 
+/* 0.27 `ar=<follow>,<rows>`, each row part, passes, mute in 2 hex digits: absent or malformed is no song (never refuses a load);
+ * the rows' lengths are checked once the parts are loaded (state_load) */
+static void load_ar(seq_arr_t *a, const char *v, int n) {
+    arr_clear(a);
+    if (!v || n < 8 || (v[0] != '0' && v[0] != '1') || v[1] != ',' || (n - 2) % 6 || (n - 2) / 6 > SEQ_ARR_MAX) return;
+    for (int i = 0; i < (n - 2) / 6; i++) {
+        int part = hex2(v + 2 + 6 * i), passes = hex2(v + 4 + 6 * i), mute = hex2(v + 6 + 6 * i);
+        if (part < 0 || part >= SEQ_NPARTS || passes < 1 || passes > 16 || mute < 0 || mute >> SEQ_ACTIVE_LANES) {
+            arr_clear(a);
+            return;
+        }
+        a->row[i] = (seq_arr_row_t){(unsigned char)part, (unsigned char)passes, (unsigned char)mute};
+    }
+    a->n = (n - 2) / 6;
+    a->follow = v[0] == '1';
+}
+
 /* The project's fields and part A */
-static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, seq_part_t *p) {
+static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, seq_part_t *p, seq_arr_t *ar) {
     int gn;
     fields_t f;
     find_fields(str, 'A', &f);
@@ -4262,6 +4380,7 @@ static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, se
     gn = f.v[F_GN] ? num(f.v[F_GN], f.n[F_GN]) : 0;
     out[4] = gn > 0 && gn <= SEQ_PRESETS_MAX ? gn : 0;   /* 0.23 the preset: absent or bad is none; never refuses a load */
     out[5] = f.v[F_PM] && f.n[F_PM] == 1 && f.v[F_PM][0] == '1';   /* 0.26 per-part mutes: only `pm=1`; never refuses a load */
+    load_ar(ar, f.v[F_AR], f.n[F_AR]);
     return parse_part(&f, p);
 }
 
@@ -4442,20 +4561,65 @@ static void load_other_part(seq_t *s, const char *str, int part) {
 }
 
 /* song (0.23 seq_song_load): a csq2 state's song only, the MIDI channels and FOLLOW kept */
+static void ready_part(seq_t *s, int part);
+static int arr_ok(const seq_t *s, const seq_arr_row_t *r, int n);
+static int arr_bars(const seq_t *s, int part);
+static void arr_mutes(seq_t *s, int m);
+static void arr_start(seq_t *s, int row, long k);
+
+/* 0.27 every row at most 64 bars of its part's own length (a part made longer: fewer passes) */
+static void arr_clamp(seq_t *s) {
+    for (int i = 0; i < s->arr.n; i++) {
+        seq_arr_row_t *r = &s->arr.row[i];
+        int most = 64 / arr_bars(s, r->part);
+        if (r->passes > most) r->passes = (unsigned char)(most < 1 ? 1 : most);
+    }
+}
+
+/* 0.27 a song load (a genre or pack preset) under a song: the rows stay (the arrangement is the user's), their parts readied from
+ * what the load brought (a part it lacks: a copy of its Verse), the row the first of the part now playing */
+static void arr_kept(seq_t *s) {
+    seq_arr_t *a = &s->arr;
+    arr_clamp(s);
+    for (int i = 0; i < a->n; i++) ready_part(s, a->row[i].part);
+    a->cur = -1;
+    for (int i = 0; i < a->n && a->cur < 0; i++)
+        if (a->row[i].part == s->cur_part) a->cur = i;
+    a->pass = 0;
+    a->jump = a->edit = a->next_row = -1;
+    if (a->cur >= 0) arr_mutes(s, a->row[a->cur].mute);
+}
+
+/* 0.27 a loaded state's arrangement (a row too long for its loaded part: fewer passes): it starts at row 0, its part playing with
+ * the row's mutes */
+static void arr_loaded(seq_t *s, const seq_arr_t *ar) {
+    s->arr = *ar;
+    arr_clamp(s);
+    if (!arr_ok(s, s->arr.row, s->arr.n)) arr_clear(&s->arr);
+    if (!s->arr.n) return;
+    for (int i = 0; i < s->arr.n; i++) ready_part(s, s->arr.row[i].part);
+    s->arr.cur = 0;
+    s->cur_part = s->arr.row[0].part;
+    for (int l = 0; l < SEQ_ACTIVE_LANES; l++) cur(s)->lane[l].mute = s->arr.row[0].mute >> l & 1;
+    if (s->view_bar >= cur(s)->bars) s->view_bar = 0;
+}
+
 static int state_load(seq_t *s, const char *str, int song) {
     int key, scale, ch[3], out[6];   /* out: SWING, GATE, DYNAMICS, FOLLOW, 0.23 the preset, 0.26 per-part mutes */
+    seq_arr_t ar;                    /* 0.27 the arrangement: a song load (a preset) keeps the playing one */
     if (!str) return 0;
     if (!strncmp(str, "csq1:", 5)) {
         if (!load_v1(s, str)) return 0;
         act(s);
         s->follow = 1;   /* a v1 state has no `fo`: FOLLOW on */
         s->preset = 0;   /* 0.23 nor a preset */
+        arr_clear(&s->arr);   /* 0.27 nor a song */
         s->naud = 0;     /* as ALL NOTES OFF: the loaded song starts clean */
         strip_clamp(s);
         s->display_rev++;   /* MPC re-reads the loaded values */
         return 1;
     }
-    if (strncmp(str, "csq2|", 5) || !parse_v2(str + 5, &key, &scale, ch, out, &s->load_tmp)) return 0;
+    if (strncmp(str, "csq2|", 5) || !parse_v2(str + 5, &key, &scale, ch, out, &s->load_tmp, &ar)) return 0;
     txn_cancel(s);
     paging_off(s);
     act(s);
@@ -4478,6 +4642,8 @@ static int state_load(seq_t *s, const char *str, int song) {
     for (int p = 1; p < SEQ_NPARTS; p++) load_other_part(s, str + 5, p);
     for (int p = 1; !out[5] && p < SEQ_NPARTS; p++)   /* 0.26 a state without `pm`: A's mutes were every part's */
         for (int l = 0; l < SEQ_LANES; l++) s->part[p].lane[l].mute = s->part[0].lane[l].mute;
+    if (!song) arr_loaded(s, &ar);
+    else if (s->arr.n) arr_kept(s);
     s->undo_n = 0;
     strip_clamp(s);
     s->display_rev++;
@@ -4526,6 +4692,7 @@ void seq_init_preset(seq_t *s) {
     txn_cancel(s);
     paging_off(s);
     act(s);
+    arr_clear(&s->arr);   /* 0.27 INIT: no song */
     s->naud = 0;
     release_all(s);
     memset(&s->keys, 0, sizeof s->keys);
@@ -7553,6 +7720,16 @@ int seq_part_used(const seq_t *s, int part) { return part >= 0 && part < SEQ_NPA
 
 /* On the UI thread: the part's first use copies the Verse (stale with it), and a stale part catches up here, so seq_block
  * only ever switches to a part that is ready. */
+/* A part about to play: on first use a copy of the Verse, and caught up if a key or scale change missed it (setters only) */
+static void ready_part(seq_t *s, int part) {
+    if (!seq_part_used(s, part)) {
+        s->part[part] = s->part[0];
+        s->used_mask |= 1 << part;
+        s->stale_mask = (s->stale_mask & ~(1 << part)) | (s->stale_mask & 1) << part;
+    }
+    if (s->stale_mask >> part & 1) refresh(s, part);
+}
+
 void seq_select_part(seq_t *s, int part) {
     if (part < 0 || part >= SEQ_NPARTS) return;
     if (part == s->cur_part || (s->playing && part == s->queued)) {   /* stopped, nothing is ever queued */
@@ -7562,14 +7739,195 @@ void seq_select_part(seq_t *s, int part) {
     }
     txn_cancel(s);   /* 0.17: an open picker or browser is the part being left's */
     act(s);
-    if (!seq_part_used(s, part)) {
-        s->part[part] = s->part[0];
-        s->used_mask |= 1 << part;
-        s->stale_mask = (s->stale_mask & ~(1 << part)) | (s->stale_mask & 1) << part;
-    }
-    if (s->stale_mask >> part & 1) refresh(s, part);
+    ready_part(s, part);
     s->queued = part;
-    if (!s->playing) switch_part(s, 0);
+    if (s->arr.n && s->arr.edit < 0) {   /* 0.27 a part button leaves the song's order: the part's first row after the playing one */
+        seq_arr_t *a = &s->arr;
+        a->follow = 0;
+        a->jump = -1;
+        a->next_row = SEQ_ARR_MAX;
+        for (int i = 1; i <= a->n; i++)
+            if (a->row[(a->cur + i + a->n) % a->n].part == part) {
+                a->next_row = (a->cur + i + a->n) % a->n;
+                break;
+            }
+    }
+    if (!s->playing) {
+        switch_part(s, 0);
+        arr_selected(s);
+    }
+}
+
+/* 0.27 the arrangement */
+
+/* A part's bars as a row would play them: its own once in use, else the Verse's (its first use copies the Verse) */
+static int arr_bars(const seq_t *s, int part) { return s->part[seq_part_used(s, part) ? part : 0].bars; }
+
+static int arr_ok(const seq_t *s, const seq_arr_row_t *r, int n) {
+    if (n < 0 || n > SEQ_ARR_MAX || (n && !r)) return 0;
+    for (int i = 0; i < n; i++)
+        if (r[i].part >= SEQ_NPARTS || r[i].passes < 1 || r[i].passes > 16 || r[i].passes * arr_bars(s, r[i].part) > 64 ||
+            r[i].mute >> SEQ_ACTIVE_LANES)
+            return 0;
+    return 1;
+}
+
+/* An index of the song before through map (-1 removed or none); next_row's SEQ_ARR_MAX (the song lacks the part) stays */
+static int arr_remap(int x, int had, const signed char *map) { return x == SEQ_ARR_MAX ? x : map && x >= 0 && x < had ? map[x] : -1; }
+
+int seq_arr_set(seq_t *s, const seq_arr_row_t *rows, int n, const signed char *map) {
+    seq_arr_t *a = &s->arr;
+    int had = a->n, took = -1;
+    if (!arr_ok(s, rows, n)) return 0;
+    for (int i = 0; map && i < had; i++)
+        if (map[i] < -1 || map[i] >= n) return 0;
+    act(s);
+    if (!n) {
+        arr_clear(a);
+        return 1;
+    }
+    for (int i = 0; i < n; i++) ready_part(s, rows[i].part);
+    if (map && a->cur >= 0 && map[a->cur] < 0) {   /* the playing row removed: the row that took its place */
+        took = 0;
+        for (int i = 0; i < a->cur; i++) took += map[i] >= 0;
+        took %= n;
+    }
+    int cur = arr_remap(a->cur, had, map), jump = arr_remap(a->jump, had, map), edit = arr_remap(a->edit, had, map);
+    int next = a->next_row < 0 ? -1 : arr_remap(a->next_row, had, map);
+    if (!had) arr_clear(a);   /* a new song follows, from no pass played */
+    memcpy(a->row, rows, sizeof *rows * (size_t)n);
+    a->n = n;
+    a->cur = cur;
+    a->jump = jump == cur ? -1 : jump;
+    a->edit = edit;
+    a->next_row = next;
+    if (!map) a->pass = 0;
+    if (took >= 0) {
+        if (!s->playing) arr_start(s, took, 0);
+        else if (a->jump < 0) a->jump = took;
+    }
+    if (arr_playing_row(s)) arr_mutes(s, a->row[a->cur].mute);   /* the playing row's mutes are its part's */
+    return 1;
+}
+
+int seq_arr_rows(const seq_t *s, seq_arr_row_t *out) {
+    if (out && s->arr.n) memcpy(out, s->arr.row, sizeof *out * (size_t)s->arr.n);
+    return s->arr.n;
+}
+
+int seq_arr_row(const seq_t *s) { return s->arr.n ? s->arr.cur : -1; }
+int seq_arr_pass(const seq_t *s) { return s->arr.pass; }
+int seq_arr_follow(const seq_t *s) { return s->arr.follow; }
+
+void seq_arr_set_follow(seq_t *s, int on) {
+    act(s);
+    s->arr.follow = on != 0;
+}
+
+void seq_arr_set_row_mute(seq_t *s, int row, int lane, int muted) {
+    seq_arr_t *a = &s->arr;
+    if (row < 0 || row >= a->n || lane < 0 || lane >= SEQ_ACTIVE_LANES) return;
+    act(s);
+    a->row[row].mute = (unsigned char)((a->row[row].mute & ~(1 << lane)) | (muted ? 1 << lane : 0));
+    if (row == a->cur && arr_playing_row(s)) mute_lane(s, lane, muted);
+}
+
+void seq_arr_jump(seq_t *s, int row) {
+    seq_arr_t *a = &s->arr;
+    if (row < 0 || row >= a->n) return;
+    act(s);
+    if (!s->playing) {
+        ready_part(s, a->row[row].part);
+        a->jump = -1;
+        arr_start(s, row, 0);
+        return;
+    }
+    a->jump = row == a->jump || row == a->cur ? -1 : row;
+}
+
+int seq_arr_jumping(const seq_t *s) { return s->arr.jump; }
+int seq_arr_editing(const seq_t *s) { return s->arr.edit; }
+
+void seq_arr_edit(seq_t *s, int row) {
+    seq_arr_t *a = &s->arr;
+    if (row < -1 || row >= a->n || row == a->edit) return;
+    act(s);
+    if (row < 0) {
+        a->edit = -1;
+        if (a->jump >= 0) a->jump = -1;   /* left before the held row started: the song goes on where it was */
+        if (a->cur >= 0 && a->row[a->cur].part == s->cur_part) {
+            arr_mutes(s, a->row[a->cur].mute);
+            if (a->follow && a->pass < a->row[a->cur].passes - 1) a->pass = a->row[a->cur].passes - 1;   /* this pass is the last */
+        }
+        return;
+    }
+    a->edit = row;
+    if (row == a->cur && a->row[row].part == s->cur_part) {
+        a->jump = -1;   /* 0.27.1 its mutes stay: › keeps sounding what played, now looping */
+    } else if (s->playing) {
+        a->jump = row;
+    } else {
+        a->jump = -1;
+        arr_start(s, row, 0);
+    }
+}
+
+double seq_arr_row_steps(const seq_t *s) {
+    const seq_arr_t *a = &s->arr;
+    if (!a->n || a->cur < 0 || !s->playing || a->row[a->cur].part != s->cur_part) return -1;
+    double len = (double)a->row[a->cur].passes * ccur(s)->bars * SEQ_STEPS, x = fmod(s->last_ppq * 4.0 - (double)s->part_origin_k, len);
+    return x < 0 ? x + len : x;
+}
+
+double seq_arr_next_steps(const seq_t *s) {
+    const seq_arr_t *a = &s->arr;
+    long origin = s->part_origin_k, len = (long)ccur(s)->bars * SEQ_STEPS, k;
+    double pos = s->last_ppq * 4.0;
+    if (!a->n || !s->playing) return -1;
+    if (a->jump >= 0) {
+        k = s->next_k + floor_mod(origin - s->next_k, SEQ_STEPS);   /* the first bar line not yet played */
+        if (k == origin) k += SEQ_STEPS;
+        return k - pos;
+    }
+    if (!a->follow || a->edit >= 0) return -1;
+    k = origin + (a->cur < 0 ? a->pass + 1 : (a->pass + 1 > a->row[a->cur].passes ? a->pass + 1 : a->row[a->cur].passes)) * len;
+    return k - pos;
+}
+
+#define FC (1 << LANE_CHORDS)
+#define FB (1 << LANE_BASS)
+#define FM (1 << LANE_MEL_UP)
+enum { FV, FI, FP, FCH, FBR, FO };   /* the parts by index (SEQ_PART_NAME) */
+static const struct { const char *name; int n; seq_form_row_t row[10]; } FORMS[SEQ_ARR_FORMS] = {
+    {"Pop", 10, {{FI, 4, FB | FM}, {FV, 8, FM}, {FP, 4, 0}, {FCH, 8, 0}, {FV, 8, 0}, {FP, 4, 0}, {FCH, 8, 0}, {FBR, 8, FB}, {FCH, 8, 0},
+                 {FO, 4, FM}}},
+    {"Club", 7, {{FI, 16, FC | FM}, {FV, 16, FM}, {FP, 8, FB}, {FCH, 16, 0}, {FBR, 8, FB | FM}, {FCH, 16, 0}, {FO, 16, FC | FM}}},
+    {"Ballad", 9, {{FI, 4, FB | FM}, {FV, 8, FB}, {FV, 8, 0}, {FCH, 8, 0}, {FV, 8, 0}, {FCH, 8, 0}, {FBR, 4, FB}, {FCH, 8, 0},
+                   {FO, 4, FB | FM}}},
+    {"Rock", 9, {{FI, 4, FM}, {FV, 8, FM}, {FCH, 8, 0}, {FV, 8, 0}, {FCH, 8, 0}, {FBR, 8, 0}, {FCH, 8, 0}, {FCH, 8, 0}, {FO, 4, FM}}},
+    {"Loop", 1, {{FV, 8, 0}}},
+};
+
+int seq_arr_form(int form, seq_form_row_t *out) {
+    if (form < 0 || form >= SEQ_ARR_FORMS) return 0;
+    if (out) memcpy(out, FORMS[form].row, sizeof *out * (size_t)FORMS[form].n);
+    return FORMS[form].n;
+}
+
+const char *seq_arr_form_name(int form) { return form >= 0 && form < SEQ_ARR_FORMS ? FORMS[form].name : NULL; }
+
+int seq_arr_set_form(seq_t *s, int form) {
+    seq_arr_row_t r[SEQ_ARR_MAX];
+    int n = seq_arr_form(form, NULL);
+    if (!n) return 0;
+    for (int i = 0; i < n; i++) {
+        const seq_form_row_t *f = &FORMS[form].row[i];
+        int bars = arr_bars(s, f->part), passes = (f->bars + bars - 1) / bars;
+        if (passes < 1) passes = 1;
+        while (passes > 1 && passes * bars > 64) passes--;
+        r[i] = (seq_arr_row_t){f->part, (unsigned char)passes, f->mute};
+    }
+    return seq_arr_set(s, r, n, NULL);
 }
 
 /* 0.12 move feedback */

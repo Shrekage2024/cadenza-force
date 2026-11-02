@@ -1,11 +1,11 @@
-plugin /tmp/cadenza.so: instrument, 2037 params, open 5.0 ms; block 128 @ 44100 Hz = 2902 us budget
+plugin /tmp/cadenza.so: instrument, 2037 params, open 3.8 ms; block 128 @ 44100 Hz = 2902 us budget
 stage               mean%     p99%     max%  threads%    peak
-idle                  4.3     22.6     39.0       0.0    0.00
-1 voices              4.3     22.6     36.3       0.0    0.00
-4 voices              4.3     22.7     46.3       0.0    0.00
-8 voices              4.3     22.7     34.9       0.0    0.00
-16 voices             4.3     22.6     37.2       0.0    0.00
-q-link sweep         10.0     42.1     58.7       0.0    0.00
-release tail          4.4     23.0     37.4       0.0    0.00
-worst p99 42.1%, worst block 58.7%, background threads up to 0.0% of a core -> FAIL
-{"plugin":"/tmp/cadenza.so","instrument":1,"open_ms":5.0,"p99_pct":42.1,"max_pct":58.7,"threads_pct":0.0,"verdict":"FAIL"}
+idle                  4.3     21.8     41.1       0.0    0.00
+1 voices              4.2     21.8     34.6       0.0    0.00
+4 voices              4.3     21.6     35.3      -0.0    0.00
+8 voices              4.3     21.8     35.3       0.0    0.00
+16 voices             4.3     21.7     35.2       0.0    0.00
+q-link sweep          9.8     40.5     57.6       0.0    0.00
+release tail          4.3     21.9     36.7       0.0    0.00
+worst p99 40.5%, worst block 57.6%, background threads up to 0.0% of a core -> FAIL
+{"plugin":"/tmp/cadenza.so","instrument":1,"open_ms":3.8,"p99_pct":40.5,"max_pct":57.6,"threads_pct":0.0,"verdict":"FAIL"}

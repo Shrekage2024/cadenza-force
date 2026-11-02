@@ -15953,6 +15953,493 @@ static void test_0242_anticipate_renders_near(void) {
           why[0] ? why : "same");
 }
 
+/* 0.27 the arrangement (the song order, iOS's song page): rows of part, passes and mutes */
+#define M_C (1 << LANE_CHORDS)
+#define M_B (1 << LANE_BASS)
+#define M_M (1 << LANE_MEL_UP)
+static const seq_arr_row_t POP[10] = {{1, 1, M_B | M_M}, {0, 2, M_M}, {2, 1, 0}, {3, 2, 0}, {0, 2, 0}, {2, 1, 0}, {3, 2, 0},
+                                      {4, 2, M_B}, {3, 2, 0}, {5, 1, M_M}};
+
+static int same_rows(const seq_t *s, const seq_arr_row_t *want, int n) {
+    seq_arr_row_t got[SEQ_ARR_MAX];
+    return seq_arr_rows(s, got) == n && !memcmp(got, want, sizeof *want * (size_t)n);
+}
+
+static void test_arr_no_song_unchanged(void) {
+    static seq_t s;
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    CHECK(seq_arr_rows(&s, NULL) == 0 && seq_arr_row(&s) == -1 && seq_arr_follow(&s) == 1, "a new instance has no song (0.27)");
+}
+
+static void test_arr_set_get(void) {
+    static seq_t s;
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    CHECK(seq_arr_set(&s, POP, 10, NULL) == 1 && same_rows(&s, POP, 10), "Pop's 10 rows set and read back");
+    CHECK(seq_arr_row(&s) == -1 && seq_arr_follow(&s) == 1 && seq_arr_pass(&s) == 0, "a new song: no row playing yet, following");
+    seq_arr_jump(&s, 0);
+    CHECK(seq_arr_row(&s) == 0 && seq_part(&s) == 1, "stopped, a jump starts row 0 (the Intro) at once");
+    int used = 1, copies = 1;
+    for (int p = 1; p < SEQ_NPARTS; p++) {
+        used &= seq_part_used(&s, p);
+        copies &= !memcmp(s.part[p].lane[LANE_CHORDS].steps, s.part[0].lane[LANE_CHORDS].steps, sizeof s.part[0].lane[0].steps);
+    }
+    CHECK(used && copies, "every part a row names is in use, a copy of the Verse");
+}
+
+static void test_arr_refuses(void) {
+    static seq_t s;
+    seq_arr_row_t rows[SEQ_ARR_MAX + 1] = {{0, 1, 0}};
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    seq_arr_set(&s, POP, 10, NULL);
+    int ok = seq_arr_set(&s, rows, SEQ_ARR_MAX + 1, NULL) == 0 && same_rows(&s, POP, 10);
+    ok &= seq_arr_set(&s, (seq_arr_row_t[]){{6, 1, 0}}, 1, NULL) == 0 && same_rows(&s, POP, 10);
+    ok &= seq_arr_set(&s, (seq_arr_row_t[]){{0, 0, 0}}, 1, NULL) == 0 && same_rows(&s, POP, 10);
+    ok &= seq_arr_set(&s, (seq_arr_row_t[]){{0, 17, 0}}, 1, NULL) == 0 && same_rows(&s, POP, 10);
+    seq_set_bars(&s, 8);   /* the playing part (the Verse: a set never switches parts) */
+    ok &= seq_arr_set(&s, (seq_arr_row_t[]){{(unsigned char)seq_part(&s), 9, 0}}, 1, NULL) == 0 && same_rows(&s, POP, 10);
+    CHECK(ok, "33 rows, part 6, 0 or 17 passes, 9 passes of 8 bars (72): refused, the song unchanged");
+}
+
+static void test_arr_cur_rule(void) {
+    static seq_t s;
+    const seq_arr_row_t three[3] = {{0, 1, 0}, {3, 1, 0}, {4, 1, 0}}, two[2] = {{0, 1, 0}, {4, 1, 0}};
+    const signed char drop1[3] = {0, -1, 1};
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    seq_arr_set(&s, three, 3, NULL);
+    seq_arr_jump(&s, 1);   /* stopped: the Chorus's row at once */
+    CHECK(seq_arr_set(&s, two, 2, drop1) == 1 && seq_arr_row(&s) == 1 && seq_part(&s) == 4,
+          "the playing row removed, stopped: the row that took its place starts (the Bridge's)");
+    seq_init(&s, emit, NULL);
+    seq_arr_set(&s, three, 3, NULL);
+    seq_arr_jump(&s, 2);
+    const signed char drop2[3] = {0, 1, -1};
+    CHECK(seq_arr_set(&s, three, 2, drop2) == 1 && seq_arr_row(&s) == 0, "the last row removed while it was the row: back to the first");
+}
+
+/* 0.27 final review: rows changed while a jump, a hold or a playing row stand: the core remaps its own indices (map: old -> new) */
+static void test_arr_set_remaps(void) {
+    static seq_t s;
+    const seq_arr_row_t five[5] = {{0, 1, 0}, {1, 1, 0}, {2, 1, 0}, {3, 1, 0}, {4, 1, 0}};
+    const seq_arr_row_t four[4] = {{0, 1, 0}, {2, 1, 0}, {3, 1, 0}, {4, 1, 0}};
+    const signed char drop1[5] = {0, -1, 1, 2, 3};
+    fresh(&s, 1);
+    seq_arr_set(&s, five, 5, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 2.5, 0);
+    seq_arr_jump(&s, 3);   /* the Chorus, queued */
+    seq_arr_set(&s, four, 4, drop1);
+    CHECK(seq_arr_jumping(&s) == 2 && seq_arr_row(&s) == 0, "a row removed above a queued jump: the jump still goes to the Chorus");
+    seq_arr_edit(&s, 3);   /* the Bridge, held (waits) */
+    const seq_arr_row_t moved[4] = {{4, 1, 0}, {0, 1, 0}, {2, 1, 0}, {3, 1, 0}};
+    const signed char rot[4] = {1, 2, 3, 0};
+    seq_arr_set(&s, moved, 4, rot);
+    CHECK(seq_arr_editing(&s) == 0 && seq_arr_jumping(&s) == 0 && seq_arr_row(&s) == 1, "a move: the hold, its jump and the playing row follow their rows");
+    ppq = play(&s, ppq, 4, 0);
+    CHECK(seq_arr_row(&s) == 0 && seq_part(&s) == 4, "and the held Bridge starts at the bar line");
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+/* 0.27 final review: the playing row removed while playing: the row that took its place, at the next bar line */
+static void test_arr_remove_playing_row(void) {
+    static seq_t s;
+    const seq_arr_row_t three[3] = {{0, 1, 0}, {3, 1, 0}, {4, 1, 0}}, two[2] = {{0, 1, 0}, {4, 1, 0}};
+    const signed char drop1[3] = {0, -1, 1};
+    fresh(&s, 1);
+    seq_arr_set(&s, three, 3, NULL);
+    seq_arr_jump(&s, 1);
+    double ppq = play(&s, 0, 2.5, 0);
+    seq_arr_set(&s, two, 2, drop1);
+    CHECK(seq_arr_row(&s) == -1 && seq_arr_jumping(&s) == 1 && seq_part(&s) == 3, "removed while it plays: it plays on, the Bridge queued");
+    ppq = play(&s, ppq, 2, 0);
+    CHECK(seq_arr_row(&s) == 1 && seq_part(&s) == 4, "the Bridge's row from the bar line");
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(balanced(), "no stuck notes");
+}
+
+/* 0.27 final review: a part made longer keeps its rows at most 64 bars (fewer passes), so the song still saves and loads */
+static void test_arr_part_grows(void) {
+    static seq_t s, t;
+    static char buf[SEQ_STATE_MAX];
+    seq_arr_row_t r[SEQ_ARR_MAX];
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    seq_arr_set(&s, (seq_arr_row_t[]){{0, 16, 0}, {0, 2, 0}}, 2, NULL);   /* the 4-bar Verse: 64 bars, then 8 */
+    seq_arr_jump(&s, 0);
+    seq_set_bars(&s, 8);
+    seq_arr_rows(&s, r);
+    CHECK(r[0].passes == 8 && r[1].passes == 2, "the Verse made 8 bars: its 64-bar row is 8 passes, its 16-bar row kept");
+    seq_set_bars(&s, 16);
+    seq_arr_rows(&s, r);
+    CHECK(r[0].passes == 4 && r[1].passes == 2, "16 bars: 4 passes; 2 x 16 = 32 kept");
+    seq_init(&t, emit, NULL);
+    CHECK(seq_state_save(&s, buf, sizeof buf) && seq_state_load(&t, buf) && seq_arr_rows(&t, NULL) == 2, "and the song saves and loads");
+    CHECK(seq_arr_set(&s, r, 2, NULL) == 1, "and takes edits");
+}
+
+/* 0.27 final review: a host loop as long as the row (the Force's arrangement loop) wraps onto its first step: that is a pass */
+static void test_arr_host_loop_onto_origin(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 1, 0}};
+    fresh(&s, 1);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 20, 16);   /* a 16-beat host loop: the Verse's 4 bars, again from 0 */
+    CHECK(seq_arr_row(&s) == 1 && seq_part(&s) == 3, "the loop's wrap ends the Verse's pass: the Chorus's row (row %d)", seq_arr_row(&s));
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+/* 0.27 final review: a preset (a song load) under a song keeps the rows; the row is the first of the part now playing */
+static void test_arr_preset_under_song(void) {
+    static seq_t s, v;
+    static char verse_only[SEQ_STATE_MAX];
+    nev = 0;
+    seq_init(&v, emit, NULL);
+    seq_state_save(&v, verse_only, sizeof verse_only);   /* a pack song that has only its Verse */
+    seq_init(&s, emit, NULL);
+    seq_arr_set_form(&s, 0);
+    seq_arr_jump(&s, 3);   /* the Chorus's row */
+    seq_set_key(&s, 9);    /* the Chorus now differs from a fresh Verse */
+    CHECK(seq_song_load(&s, verse_only) && seq_arr_rows(&s, NULL) == 10, "a song load keeps the rows");
+    CHECK(seq_part(&s) == 0 && seq_arr_row(&s) == 1, "the Verse plays: row 1, the first Verse row (not the Chorus's row 3)");
+    CHECK(!memcmp(s.part[3].lane[LANE_CHORDS].steps, s.part[0].lane[LANE_CHORDS].steps, sizeof s.part[0].lane[0].steps),
+          "a row's part the load lacks is a copy of the new Verse, not the old song's Chorus");
+}
+
+/* 0.27 final review: where the playing row is, from the core, wrapping by the row while held */
+static void test_arr_row_position(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 2, 0}, {3, 1, 0}};   /* the Verse twice: 8 bars, 128 16ths */
+    fresh(&s, 1);
+    seq_arr_set(&s, rows, 2, NULL);
+    CHECK(seq_arr_row_steps(&s) == -1, "stopped: none");
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 10, 0);
+    double at10 = seq_arr_row_steps(&s);
+    seq_arr_edit(&s, 0);
+    ppq = play(&s, ppq, 40, 0);   /* to beat 50: held, past the row's 32 beats */
+    double at50 = seq_arr_row_steps(&s);
+    CHECK(at10 > 38 && at10 < 41, "beat 10: 40 16ths into the row (%.1f)", at10);
+    CHECK(at50 > 70 && at50 < 73, "held at beat 50: 18 beats into its second time through (%.1f)", at50);
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+static void test_arr_row_mute(void) {
+    static seq_t s;
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    seq_arr_set(&s, POP + 1, 9, NULL);   /* from Pop's first Verse: the Verse plays row 0 */
+    seq_arr_jump(&s, 0);
+    int bass = seq_mute(&s, LANE_BASS);
+    seq_arr_set_row_mute(&s, 2, LANE_BASS, 1);
+    seq_arr_row_t r[SEQ_ARR_MAX];
+    seq_arr_rows(&s, r);
+    CHECK(r[2].mute == M_B && seq_mute(&s, LANE_BASS) == bass, "a key on row 2 marks the row, not the playing part");
+    seq_arr_set_row_mute(&s, 0, LANE_CHORDS, 1);
+    seq_arr_rows(&s, r);
+    CHECK((r[0].mute & M_C) && seq_mute(&s, LANE_CHORDS) == 1, "on the playing row it is heard at once");
+}
+
+static void test_arr_save_load(void) {
+    static seq_t s, t;
+    static char buf[SEQ_STATE_MAX];
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    CHECK(seq_state_save(&s, buf, sizeof buf) && !strstr(buf, "|ar="), "no song: no ar= (saves as 0.26 did)");
+    seq_init(&t, emit, NULL);
+    CHECK(seq_state_load(&t, buf) && seq_arr_rows(&t, NULL) == 0, "and loads with no song");
+    seq_arr_set(&s, POP, 10, NULL);
+    seq_arr_set_follow(&s, 0);
+    CHECK(seq_state_save(&s, buf, sizeof buf) && strstr(buf, "|ar=0,"), "a song saves as ar=");
+    CHECK(seq_state_load(&t, buf) && same_rows(&t, POP, 10) && seq_arr_follow(&t) == 0 && seq_arr_row(&t) == 0 &&
+          seq_part(&t) == POP[0].part, "and loads: the rows, follow, row 0's part playing");
+    static char preset[SEQ_STATE_MAX];
+    seq_init(&s, emit, NULL);
+    seq_state_save(&s, preset, sizeof preset);   /* a preset's chunk: no song */
+    CHECK(seq_song_load(&t, preset) && same_rows(&t, POP, 10), "a genre preset (seq_song_load) keeps the rows");
+    seq_init_preset(&t);
+    CHECK(seq_arr_rows(&t, NULL) == 0 && seq_arr_row(&t) == -1, "INIT clears them");
+    seq_state_load(&t, buf);
+    char *ar = strstr(buf, "|ar=");
+    memcpy(ar + 4, "z", 1);
+    CHECK(seq_state_load(&t, buf) && seq_arr_rows(&t, NULL) == 0, "a malformed ar= loads with no song");
+}
+
+/* every 16th in [from, to) has exactly n note-ons on channel ch, from event index at */
+static int each_step(int at, int ch, long from, long to, int n) {
+    int low, part, ok = 1;
+    for (long k = from; k < to; k++) ok &= ons_from(at, ch, k, &low, &part) == n;
+    return ok;
+}
+
+static void test_arr_plays_in_order(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 2, 0}};   /* Verse x1 (4 bars), Chorus x2 (2 bars each) */
+    int low, r10, r20, r36, p0, p1, p2;
+    chorus_setup(&s);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 10, 0);
+    r10 = seq_arr_row(&s);
+    ppq = play(&s, ppq, 10, 0);
+    r20 = seq_arr_row(&s);
+    ppq = play(&s, ppq, 16, 0);
+    r36 = seq_arr_row(&s);
+    ppq = play(&s, ppq, 4, 0);
+    ons_at(2, 48, &low, &p0);
+    ons_at(2, 64, &low, &p1);
+    ons_at(2, 128, &low, &p2);
+    CHECK(r10 == 0 && r20 == 1 && r36 == 0, "the song plays its rows: 0 at beat 10, 1 at 20, 0 again at 36 (%d %d %d)", r10, r20, r36);
+    CHECK(p0 == 0 && p1 == 3 && p2 == 0, "the Verse to beat 16, the Chorus from 16 (two passes), the Verse from 32 (%d %d %d)", p0, p1, p2);
+    CHECK(each_step(0, 4, 4, 160, 1), "every 16th from beat 1 to 40 fired exactly once across both switches");
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(balanced(), "no stuck notes");
+}
+
+static void test_arr_same_part_rows(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {0, 1, M_M}};
+    int bad = 0;
+    fresh(&s, 1);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 20, 0);
+    int r20 = seq_arr_row(&s);
+    ppq = play(&s, ppq, 16, 0);
+    for (int i = 0; i < nev; i++) bad += is_on(&evs[i]) && evs[i].part != 0;
+    CHECK(!bad && r20 == 1, "a row of the same part: no switch, row 1 from beat 16");
+    CHECK(each_step(0, 4, 4, 64, 1) && each_step(0, 4, 64, 128, 0) && each_step(0, 4, 128, 140, 1),
+          "row 1's mutes from its first step: the melody silent from beat 16 to 32, back at 32");
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(balanced(), "no stuck notes");
+}
+
+static void test_arr_row_mutes_at_start(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, M_B}, {3, 1, 0}};
+    int bass_before = 0, bass_after = 0;
+    chorus_setup(&s);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    CHECK(seq_mute(&s, LANE_BASS) == 1, "the playing row's mutes are its part's once set (the Verse plays row 0)");
+    double ppq = play(&s, 0, 24, 0);
+    for (int i = 0; i < nev; i++) {
+        if (!is_on(&evs[i]) || (evs[i].status & 15) != 2) continue;
+        if (evs[i].k < 64) bass_before++;
+        else bass_after++;
+    }
+    CHECK(!bass_before && bass_after, "no bass before the Chorus's row, bass in it (%d, %d)", bass_before, bass_after);
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(balanced(), "no stuck notes");
+}
+
+static void test_arr_follow_off(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 1, 0}};
+    int bad = 0;
+    fresh(&s, 1);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 10, 0);
+    seq_arr_set_follow(&s, 0);
+    ppq = play(&s, ppq, 10, 0);
+    for (int i = 0; i < nev; i++) bad += is_on(&evs[i]) && evs[i].part != 0;
+    CHECK(!bad && seq_arr_row(&s) == 0, "follow off (Loop part): the Verse's row repeats past its end");
+    seq_arr_set_follow(&s, 1);
+    ppq = play(&s, ppq, 14, 0);
+    CHECK(seq_arr_row(&s) == 1 && seq_part(&s) == 3, "follow on again: the next row at the next pass end (beat 32)");
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+static void test_arr_loop_back(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 2, 0}};
+    chorus_setup(&s);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    play(&s, 0, 20, 0);   /* the Chorus's row since beat 16 */
+    int at = nev;
+    double ppq = play(&s, 12, 2, 0);   /* the host locates back 8 beats */
+    int r1 = seq_arr_row(&s), p1 = seq_arr_pass(&s);
+    ppq = play(&s, ppq, 12, 0);   /* to beat 26: one pass ends at 24 */
+    int r2 = seq_arr_row(&s), p2 = seq_arr_pass(&s);
+    ppq = play(&s, ppq, 8, 0);   /* to 34 */
+    int r3 = seq_arr_row(&s);
+    CHECK(r1 == 1 && p1 == 0 && r2 == 0 && r3 == 0,
+          "a locate back: the row never runs back; the wrap onto its bar 1 at 16 and the end at 24 are its 2 passes (%d/%d, %d/%d, %d)",
+          r1, p1, r2, p2, r3);
+    CHECK(each_step(at, 4, 49, 136, 1), "and from the locate on every 16th fires once");
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(balanced(), "no stuck notes");
+}
+
+static void test_arr_key_change_catches_up(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 1, 0}};
+    int low, part;
+    chorus_setup(&s);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 4, 0);
+    seq_set_key(&s, 0);
+    CHECK(!(s.stale_mask >> 3 & 1), "a key change during the Verse: the Chorus (the next row) caught up by the setter");
+    ppq = play(&s, ppq, 14, 0);
+    CHECK(ons_at(2, 64, &low, &part) == 3 && part == 3 && low != 52, "and plays the new key at its switch (low %d)", low);
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+static void test_arr_mute_writes_back(void) {
+    static seq_t s, t;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 1, 0}};
+    seq_arr_row_t r[SEQ_ARR_MAX];
+    fresh(&s, 1);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    seq_set_mute(&s, LANE_MEL_UP, 1);
+    seq_arr_rows(&s, r);
+    CHECK(r[0].mute == M_M && r[1].mute == 0, "a mute on the playing part writes the playing row's");
+    fresh(&t, 1);
+    seq_set_mute(&t, LANE_MEL_UP, 1);
+    CHECK(seq_arr_rows(&t, NULL) == 0 && seq_mute(&t, LANE_MEL_UP), "no song: the part's alone, as 0.26");
+}
+
+static void test_arr_jump(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[3] = {{0, 1, 0}, {3, 1, 0}, {4, 1, 0}};
+    int bad = 0, low, part;
+    chorus_setup(&s);
+    seq_arr_set(&s, rows, 3, NULL);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 9.5, 0);
+    seq_arr_jump(&s, 1);
+    CHECK(seq_arr_jumping(&s) == 1 && seq_arr_row(&s) == 0, "a jump at beat 9.5 queues row 1");
+    int at = nev;
+    ppq = play(&s, ppq, 12.0 - ppq - 1e-6, 0);
+    for (int i = at; i < nev; i++) bad += is_on(&evs[i]) && evs[i].part != 0;
+    ppq = play(&s, ppq, 4, 0);
+    CHECK(!bad && seq_arr_row(&s) == 1 && seq_arr_jumping(&s) == -1 && ons_at(2, 48, &low, &part) == 3 && part == 3,
+          "nothing of it before the bar line at beat 12, the Chorus's row from it, once");
+    seq_arr_jump(&s, 2);
+    seq_arr_jump(&s, 0);
+    CHECK(seq_arr_jumping(&s) == 0, "a second jump replaces the first");
+    seq_arr_jump(&s, 1);
+    CHECK(seq_arr_jumping(&s) == -1, "the playing row cancels it");
+    seq_arr_jump(&s, 2);
+    seq_arr_jump(&s, 2);
+    CHECK(seq_arr_jumping(&s) == -1, "and so does the queued row");
+    seq_block(&s, ppq, bpm, 0, 128);
+    seq_arr_jump(&s, 1);
+    CHECK(seq_arr_row(&s) == 1 && seq_part(&s) == 3 && seq_arr_jumping(&s) == -1, "stopped: a jump starts there at once");
+    CHECK(balanced(), "no stuck notes");
+}
+
+static void test_arr_edit_hold(void) {
+    static seq_t s;
+    seq_arr_row_t r[SEQ_ARR_MAX], before[SEQ_ARR_MAX];
+    int mel = 0;
+    fresh(&s, 1);
+    seq_arr_set_form(&s, 0);   /* Pop: row 1 is the Verse with no melody */
+    seq_arr_rows(&s, before);
+    seq_arr_jump(&s, 0);       /* stopped: the Intro's row at once */
+    double ppq = play(&s, 0, 2.5, 0);
+    seq_arr_edit(&s, 1);
+    CHECK(seq_arr_editing(&s) == 1 && seq_arr_jumping(&s) == 1, "Edit on row 1 while row 0 plays: held, waiting for the bar line");
+    int at = nev;
+    ppq = play(&s, ppq, 40, 0);   /* past the Verse's 2 passes (8 bars, 32 beats) from beat 4 */
+    for (int i = at; i < nev; i++) mel += is_on(&evs[i]) && (evs[i].status & 15) == 3 && evs[i].k >= 16;
+    seq_arr_rows(&s, r);
+    CHECK(seq_arr_row(&s) == 1 && seq_part(&s) == 0 && mel == 0 && seq_mute(&s, LANE_MEL_UP) == 1 && r[1].mute == M_M,
+          "0.27.1 the Verse from beat 4, still looping at 42, with the row's own mutes: no melody (%d notes)", mel);
+    seq_arr_set_row_mute(&s, 1, LANE_MEL_UP, 0);   /* the Edit page's Mute key: the held row's own */
+    CHECK(seq_mute(&s, LANE_MEL_UP) == 0, "0.27.1 unmuting the held row's melody is heard at once");
+    mel = 0, at = nev;
+    ppq = play(&s, ppq, 8, 0);
+    for (int i = at; i < nev; i++) mel += is_on(&evs[i]) && (evs[i].status & 15) == 3 && evs[i].k >= 16;
+    seq_set_mute(&s, LANE_BASS, 1);   /* a lane page's mute while held: the held row's */
+    seq_arr_rows(&s, r);
+    CHECK(mel > 10 && r[1].mute == M_B, "0.27.1 the melody plays (%d notes); a lane mute while held writes the held row", mel);
+    for (int i = 0; i < 10; i++)
+        if (i != 1) CHECK(r[i].mute == before[i].mute, "0.27.1 row %d's mutes untouched: mutes are per row, not per part", i);
+    seq_arr_edit(&s, -1);
+    seq_arr_rows(&s, r);
+    CHECK(seq_arr_editing(&s) == -1 && seq_mute(&s, LANE_MEL_UP) == 0 && seq_mute(&s, LANE_BASS) == 1 && r[1].mute == M_B,
+          "0.27.1 Back to song keeps the held row's mutes");
+    ppq = play(&s, ppq, 12, 0);   /* to 62.5: the pass ends at 52 */
+    CHECK(seq_arr_row(&s) == 2, "and the song moves on (row 2) at the end of the pass it was in");
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(balanced(), "no stuck notes");
+}
+
+static void test_arr_edit_stop_while_waiting(void) {
+    static seq_t s;
+    fresh(&s, 1);
+    seq_arr_set_form(&s, 0);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 2.5, 0);
+    seq_arr_edit(&s, 3);
+    seq_block(&s, ppq, bpm, 0, 128);
+    CHECK(seq_arr_row(&s) == 3 && seq_arr_jumping(&s) == -1 && seq_arr_editing(&s) == 3 && seq_part(&s) == 3,
+          "a stop while Edit waits: the held row starts at once");
+}
+
+static void test_arr_manual_part(void) {
+    static seq_t s;
+    fresh(&s, 1);
+    seq_arr_set_form(&s, 0);
+    seq_arr_jump(&s, 0);
+    double ppq = play(&s, 0, 2.5, 0);
+    seq_select_part(&s, 3);
+    CHECK(seq_arr_follow(&s) == 0, "a part button with a song: follow off");
+    ppq = play(&s, ppq, 4, 0);
+    CHECK(seq_part(&s) == 3 && seq_arr_row(&s) == 3, "after the bar line: the Chorus, the first Chorus row after the playing one");
+    seq_arr_set(&s, (seq_arr_row_t[]){{3, 1, 0}, {0, 1, 0}}, 2, NULL);
+    seq_select_part(&s, 4);
+    ppq = play(&s, ppq, 4, 0);
+    CHECK(seq_part(&s) == 4 && seq_arr_row(&s) == -1, "a part the song lacks: no row");
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+static void test_arr_next_steps(void) {
+    static seq_t s;
+    const seq_arr_row_t rows[2] = {{0, 1, 0}, {3, 1, 0}};
+    fresh(&s, 1);
+    seq_arr_set(&s, rows, 2, NULL);
+    seq_arr_jump(&s, 0);
+    CHECK(seq_arr_next_steps(&s) == -1, "stopped: no countdown");
+    double ppq = play(&s, 0, 10, 0);
+    double want = 64 - s.last_ppq * 4, got = seq_arr_next_steps(&s);
+    CHECK(fabs(got - want) < 1e-6 && got > 23 && got < 25, "at beat 10: the 16ths to the row's end at beat 16 (%.2f)", got);
+    ppq = play(&s, ppq, 15.5, 0);   /* to beat 25.5: row 1 since 16 */
+    seq_arr_jump(&s, 0);
+    got = seq_arr_next_steps(&s);
+    CHECK(fabs(got - (112 - s.last_ppq * 4)) < 1e-6, "a jump queued at 25.5: to the bar line at 28 (%.2f)", got);
+    seq_arr_jump(&s, 0);
+    seq_arr_set_follow(&s, 0);
+    CHECK(seq_arr_next_steps(&s) == -1, "follow off, nothing queued: none");
+    seq_block(&s, ppq, bpm, 0, 128);
+}
+
+static void test_arr_forms(void) {
+    static seq_t s;
+    seq_form_row_t f[SEQ_ARR_MAX];
+    const seq_form_row_t pop[10] = {{1, 4, M_B | M_M}, {0, 8, M_M}, {2, 4, 0}, {3, 8, 0}, {0, 8, 0}, {2, 4, 0}, {3, 8, 0}, {4, 8, M_B},
+                                    {3, 8, 0}, {5, 4, M_M}};
+    CHECK(seq_arr_form(0, f) == 10 && !memcmp(f, pop, sizeof pop) && !strcmp(seq_arr_form_name(0), "Pop"), "Pop, as the spec lists it");
+    CHECK(seq_arr_form(1, NULL) == 7 && seq_arr_form(2, NULL) == 9 && seq_arr_form(3, NULL) == 9 && seq_arr_form(4, NULL) == 1 &&
+          !strcmp(seq_arr_form_name(4), "Loop") && !seq_arr_form_name(5) && !seq_arr_form(5, NULL), "Club 7, Ballad 9, Rock 9, Loop 1");
+    nev = 0;
+    seq_init(&s, emit, NULL);
+    seq_arr_row_t r[SEQ_ARR_MAX];
+    CHECK(seq_arr_set_form(&s, 1) == 1 && seq_arr_rows(&s, r) == 7 && r[0].part == 1 && r[0].passes == 4 && r[0].mute == (M_C | M_M),
+          "Club on new 4-bar parts: its Intro 16 bars is 4 passes, bass alone");
+    int used = 1;
+    for (int p = 0; p < SEQ_NPARTS; p++) used &= seq_part_used(&s, p);
+    CHECK(used && seq_arr_row(&s) == -1, "every part in use (copies of the Verse), no row playing until a jump");
+}
+
 int main(void) {
     test_theory();
     test_new_scales();
@@ -16330,6 +16817,31 @@ int main(void) {
     test_0242_colour_turn_anticipates();
     test_0242_anticipate_narrow_render();
     test_0242_anticipate_renders_near();
+    test_arr_no_song_unchanged();
+    test_arr_set_get();
+    test_arr_refuses();
+    test_arr_cur_rule();
+    test_arr_set_remaps();
+    test_arr_remove_playing_row();
+    test_arr_part_grows();
+    test_arr_host_loop_onto_origin();
+    test_arr_preset_under_song();
+    test_arr_row_position();
+    test_arr_row_mute();
+    test_arr_save_load();
+    test_arr_plays_in_order();
+    test_arr_same_part_rows();
+    test_arr_row_mutes_at_start();
+    test_arr_follow_off();
+    test_arr_loop_back();
+    test_arr_key_change_catches_up();
+    test_arr_mute_writes_back();
+    test_arr_jump();
+    test_arr_edit_hold();
+    test_arr_edit_stop_while_waiting();
+    test_arr_manual_part();
+    test_arr_next_steps();
+    test_arr_forms();
     printf(fails ? "\nFAILED: %d\n" : "\nPASSED\n", fails);
     return fails != 0;
 }

@@ -393,12 +393,24 @@ typedef struct { int view, rgroup, browse_genre, paging, hold_page, page_hand, c
 #define SEQ_KEY_HI 83
 typedef struct { uint64_t lit, fold; unsigned char edge[2]; } seq_keys_t;
 
+/* 0.27 the arrangement: the song order iOS's song page edits (docs/superpowers/specs/2026-11-01-ios-song-page-design.md). A row is a
+ * part played for `passes` of its own bars (passes x bars at most 64), with its own mutes (bit lane, LANE_CHORDS..LANE_MEL_UP); the
+ * same part may be in several rows. n 0: no song, every rule below off (0.26's behaviour). cur: the playing row, -1 none (removed);
+ * pass: its passes played; jump: a row queued for the next bar line, -1 none; follow: 1 the song moves on at the end of a row's last
+ * pass, 0 the row repeats (Loop part); edit: the row Edit mode holds, -1 none; next_row: the row a part button's queued part makes
+ * the playing one (seq_select_part), -1 none. Saved as `ar=` only when n > 0. */
+#define SEQ_ARR_MAX 32
+typedef struct { unsigned char part, passes, mute; } seq_arr_row_t;
+typedef struct { seq_arr_row_t row[SEQ_ARR_MAX]; int n, cur, pass, jump, follow, edit, next_row, fresh; } seq_arr_t;   /* fresh: the row's first
+                                                                                                    * step not yet played (not a pass end) */
+
 typedef struct {
     int key, scale;            /* the whole project's: 4 = E, SCALE_MINOR */
     int chan[SEQ_LANES];       /* each lane's MIDI channel, 1-16: 1, 2, 3 new; 2, 3, 4 for a state saved before 0.7 */
     int swing, gate, dyn;      /* the output stage, 0..100 each; neutral (0, 50, 50) plays exactly as 0.6 */
     seq_part_t part[SEQ_PARTS];
     int cur_part;              /* the playing part, which the setters edit */
+    seq_arr_t arr;             /* 0.27 the arrangement (the song order) */
     int queued;                /* the part seq_block switches to at the next bar line, -1 none */
     int used_mask, stale_mask; /* bit p: part p is in use; part p missed a key or scale change (catches up when selected) */
     long part_origin_k;        /* the 16th the playing part's bar 1 began on (0 after a stop); its position counts from it */
@@ -558,6 +570,43 @@ int  seq_part(const seq_t *s);                 /* the playing (and edited) part 
 int  seq_queued_part(const seq_t *s);          /* -1 when nothing is queued */
 void seq_select_part(seq_t *s, int part);      /* 0..SEQ_NPARTS-1, else ignored */
 int  seq_part_used(const seq_t *s, int part);
+
+/* 0.27 the arrangement (seq_arr_t). seq_arr_set: rows (n 0..SEQ_ARR_MAX; n 0 clears the song); map, for each row of the song before,
+ * its index in the new rows or -1 (removed): the playing row, a queued jump, the hold and a part button's row follow their rows, as
+ * the core has them now (an edit and a row change can cross). The playing row removed: its part plays on and the row that took its
+ * place (the first after the last) starts at the next bar line, at once when stopped. map NULL: a new song, no row playing until a
+ * jump or the end of the playing part's pass. Refused (0, nothing changes) for a bad n, row or map. Every part a row names comes into
+ * use as a selection would bring it (a copy of the Verse first, a stale part caught up). It never touches UNDO. A part made longer
+ * keeps its rows at most 64 bars (fewer passes). seq_arr_set_row_mute: a row's mute; on the playing row the playing part's too, at
+ * once. */
+int  seq_arr_set(seq_t *s, const seq_arr_row_t *rows, int n, const signed char *map);
+int  seq_arr_rows(const seq_t *s, seq_arr_row_t *out);   /* n (0: no song); out may be NULL */
+int  seq_arr_row(const seq_t *s);                        /* the playing row, -1 none */
+int  seq_arr_pass(const seq_t *s);                       /* passes of the playing row played */
+void seq_arr_set_follow(seq_t *s, int on);
+int  seq_arr_follow(const seq_t *s);
+void seq_arr_set_row_mute(seq_t *s, int row, int lane, int muted);
+/* seq_arr_jump: playing, row starts at the next bar line (a second jump replaces it; the queued or the playing row cancels it);
+ * stopped, at once. seq_arr_edit (Edit mode): holds row, jumping to it unless it plays, its part heard with the row's own mutes
+ * (0.27.1; seq_arr_set_row_mute and seq_set_mute on the held row are heard at once); -1 ends it: the playing row's mutes on its
+ * part, and while following its current pass is its last.
+ * seq_arr_next_steps: 16ths from the last played position to the next row change (a jump's bar line, else the end of the playing
+ * row's last pass while following and not held); -1 stopped, no song or none due. A part button (seq_select_part) with a song and
+ * no hold turns follow off; the playing row becomes the first row of that part after the playing one, -1 if none. */
+void   seq_arr_jump(seq_t *s, int row);
+int    seq_arr_jumping(const seq_t *s);   /* the queued row, -1 none */
+void   seq_arr_edit(seq_t *s, int row);
+int    seq_arr_editing(const seq_t *s);   /* the held row, -1 none */
+double seq_arr_next_steps(const seq_t *s);
+double seq_arr_row_steps(const seq_t *s);   /* 16ths played into the playing row, wrapping by the row (a held or looped row too); -1
+                                            * stopped or no row */
+/* The song forms: rows of part, bars, mute (bit lane) for the parts' default lengths; seq_arr_set_form lays one out in passes of each
+ * part's own bars (rounded up, at least 1, at most 64 bars) with no row playing (cur -1: a jump starts it) */
+#define SEQ_ARR_FORMS 5
+typedef struct { unsigned char part, bars, mute; } seq_form_row_t;
+int         seq_arr_form(int form, seq_form_row_t *out);   /* its rows (0: a bad form); out may be NULL */
+const char *seq_arr_form_name(int form);                   /* "Pop", "Club", "Ballad", "Rock", "Loop"; NULL out of range */
+int         seq_arr_set_form(seq_t *s, int form);          /* 1, 0 for a bad form */
 
 /* The generator (gen.h) on the playing part. Each regenerates what it changes; none runs on the audio thread.
  * An Answer on Melody 2 always takes Melody 1's steps as its lead (whatever Melody 1's style, Manual included), so

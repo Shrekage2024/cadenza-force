@@ -1,4 +1,4 @@
-# Cadenza 0.26.0 — The Manual
+# Cadenza 0.27.1 — The Manual
 
 Everything Cadenza does, every page, every control and every knob, in one place. Read it from the top the first time,
 then use it as a reference. The [cheat sheet](#22-cheat-sheet) at the end puts it all on one page.
@@ -23,12 +23,14 @@ walkthrough and the browser version.
 
 The colours on screen always mean the same lane: **amber** is Chords, **blue** is Bass, **green** is Melody.
 
-The screenshots were taken on a Force running Cadenza 0.26.0, playing the House 124 preset.
+The screenshots were taken on a Force running Cadenza 0.26.0, playing the House 124 preset. The pages are the same in
+0.27.
 
 ---
 
 ## Contents
 
+- [What's new in 0.27](#whats-new-in-027)
 - [What's new in 0.26](#whats-new-in-026)
 
 1. [What Cadenza is](#1-what-cadenza-is)
@@ -58,6 +60,13 @@ Reference: [progressions](#a-progressions) · [scales and borrowed chords](#b-sc
 [voicing styles](#c-voicing-styles) · [bass styles](#d-bass-styles) · [rhythms](#e-rhythms)
 
 ---
+
+## What's new in 0.27
+
+**Nothing changes on the Force's screen.** 0.27.0 and 0.27.1 add a song order to the engine: a list of rows, each a
+song part played for some passes with its own mutes. The iOS app's song page uses it; the Force has no song page yet.
+
+A project with no song order, which is every project made on the Force, plays and saves exactly as in 0.26.
 
 ## What's new in 0.26
 
@@ -100,13 +109,13 @@ You need:
 
 ### Install
 
-1. Download `Cadenza-0.26.0-mpc-armv7.zip` and unzip it on your computer.
+1. Download `Cadenza-0.27.1-mpc-armv7.zip` and unzip it on your computer.
 2. **Save your project.** The installer stops MPC and starts it again.
 3. Copy the folder to the device and run the installer:
 
    ```
-   scp -r Cadenza-0.26.0 root@<device-ip>:/tmp/
-   ssh root@<device-ip> sh /tmp/Cadenza-0.26.0/install.sh
+   scp -r Cadenza-0.27.1 root@<device-ip>:/tmp/
+   ssh root@<device-ip> sh /tmp/Cadenza-0.27.1/install.sh
    ```
 
 The installer checks the device, stops MPC, copies the plugin folder to `/sdcard/Synths/Cadenza - VST - Cadenza/`,
@@ -125,7 +134,7 @@ Run the new version's installer the same way; it upgrades in place. Then:
 
 ### Uninstall
 
-`ssh root@<device-ip> sh /tmp/Cadenza-0.26.0/uninstall.sh` removes the plugin folder and its entry in the plugin list,
+`ssh root@<device-ip> sh /tmp/Cadenza-0.27.1/uninstall.sh` removes the plugin folder and its entry in the plugin list,
 and restarts MPC. Projects that use Cadenza load without it.
 
 ---

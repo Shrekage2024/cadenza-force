@@ -426,5 +426,27 @@
    "kept on the Force: CS Test 0-26-0 (the only test project; for the owner's verification of VST-52)"
   ],
   "result": "pass"
+ },
+ {
+  "version": "0.27.0",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-11-01",
+  "includes": "the song order in the shared core (seq_arr_*: rows of part, passes and lane mutes; song forms; jumps; Edit-mode hold) for the iOS song page (ios 0.7.0); the Force has no song screen yet, so its behaviour is unchanged; part selection and lane mutes were refactored (ready_part, mute_lane); skin unchanged",
+  "checks": [
+   "bench before install (nothing installed): p99 40.5%, worst block 57.6% (0.26.0 read 42.1 / 58.7; budget 49 / 80; toolchain verdict FAIL from its q-link sweep, as since 0.24); tests/budget.sh BUDGET OK (binary 630 KB)",
+   "install: tools/deploy.sh of dist/Cadenza-0.27.0-mpc-armv7.zip over 0.26.0; installed .so matches the package (md5 fed93337...); filmstrip cache of earlier starts cleaned",
+   "fresh project CS Test 0-27-0, saved to [User] Force Documents/Projects: Cadenza on Plugin 001 (replacing the template's Hype), 16-bar clip in scene 1; every 'by ear' check is a capture of the Cadenza ALSA port (arecordmidi, 137:0), channels Chords 1, Bass 2, Melody 3",
+   "stopped: Bass muted in the Verse; the Chorus's first use copies it; Chorus Bass on and Melody muted; Verse and Chorus each keep their own mutes when picked again (lane-name tiles sampled from screenshots)",
+   "playing at 128 BPM, MIDI captured 33 s: the Chorus sends Chords and Bass, no Melody; the Verse queued at 8.56 s takes over at the next bar line (9.10 s) with Chords and Melody, no Bass; the Chorus queued at 20.99 s takes over at its bar line (22.23 s) with Bass back, the Verse's last Melody note at 21.99 s",
+   "every tab opens while playing: PLAY, CHORDS JAM, BASS JAM, MELODY JAM, GLOBAL",
+   "save: the project's plugin state decodes to csq2 with |pm=1, A2=1 (Verse Bass muted), D3=1 (Chorus Melody muted), no |ar= (no song on the Force)",
+   "full Force restart (reboot over SSH), project reopened from the Browser: Cadenza opens on the Verse with Bass muted, the Chorus with Bass on and Melody muted; playing capture again: Verse at bar line 9.01 s with no Bass, Chorus at bar line 22.13 s with Bass, no Melody while it plays",
+   "preset load while playing: House 124 loads (8 bars, 124 BPM, every lane on) and keeps playing; 8 s capture: Chords 51, Bass 17, Melody 22 notes",
+   "UI cost not re-measured: the skin and the web host are unchanged since 0.26.0 (vst/ui_cost.json from 0.26.0)",
+   "soak 12 minutes, 30 s interval, PLAY page open, playing House 124: MPC RSS 647360 -> 647360 kB, filmstrips 238944 -> 238944 kB, main thread 7.6%; 3 log lines, all the kernel's periodic note of a 2023 EXT4 error on loop0 (not Cadenza); Cadenza MIDI still flowing at the end (vst/soak.txt)",
+   "on the Force: CS Test 0-26-0 (kept for the owner's VST-52 check) and CS Test 0-27-0 (this test) - the 2-project limit"
+  ],
+  "result": "pass"
  }
 ]
