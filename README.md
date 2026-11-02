@@ -1,4 +1,4 @@
-# Cadenza 0.26.0
+# Cadenza 0.27.1
 
 **A chord-driven generative MIDI sequencer for the Akai Force.** Cadenza is a native VST2 plugin that plays chords,
 a bass line and a melody into three of your Force tracks. Pick a key, tap a block, turn a knob: it writes the parts,
@@ -29,7 +29,8 @@ Called Chord Seq until 0.25.0. The plugin's ID (`ChSq`) kept the old name, so pr
 
 ## Screenshots
 
-Taken on an Akai Force (MPC OS 3.9.1) running Cadenza 0.26.0, playing the House 124 preset.
+Taken on an Akai Force (MPC OS 3.9.1) running Cadenza 0.26.0, playing the House 124 preset. The Force's pages are the
+same in 0.27.
 
 | | |
 |---|---|
@@ -103,13 +104,13 @@ The manual has more screens: every editor, browser and picker.
 
 ## Install
 
-1. Download the release zip (`Cadenza-0.26.0-mpc-armv7.zip`) and unzip it on your computer.
+1. Download the release zip (`Cadenza-0.27.1-mpc-armv7.zip`) and unzip it on your computer.
 2. **Save your project.** The installer stops and restarts MPC.
 3. Copy the folder to the device and run the installer:
 
    ```
-   scp -r Cadenza-0.26.0 root@<device-ip>:/tmp/
-   ssh root@<device-ip> sh /tmp/Cadenza-0.26.0/install.sh
+   scp -r Cadenza-0.27.1 root@<device-ip>:/tmp/
+   ssh root@<device-ip> sh /tmp/Cadenza-0.27.1/install.sh
    ```
 
 The installer copies the plugin to `/sdcard/Synths/Cadenza - VST - Cadenza/`, backs up `MPC.settings`, adds Cadenza to
@@ -176,7 +177,7 @@ More in the [manual's troubleshooting chapter](MANUAL.md#21-troubleshooting).
 | Timing | 16 steps a bar, placed from MPC's song position; follows MPC's tempo |
 | Keys and scales | 12 keys; Major, Minor, Dorian, Mixolydian, Phrygian, Lydian, Harmonic minor |
 | Presets | Init and 6 genre presets in MPC's PRESET menu |
-| CPU | p99 42.1 % of one audio block, worst block 58.7 %, in the toolchain bench's worst-case knob sweep on the Force |
+| CPU | p99 40.5 % of one audio block, worst block 57.6 %, in the toolchain bench's worst-case knob sweep on the Force (0.27.0) |
 | Plugin ID | `ChSq` |
 
 ---
