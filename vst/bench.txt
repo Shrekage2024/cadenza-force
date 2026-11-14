@@ -1,11 +1,13 @@
-plugin /tmp/cadenza.so: instrument, 2037 params, open 5.0 ms; block 128 @ 44100 Hz = 2902 us budget
+plugin /tmp/cadenza.so: instrument, 2037 params, open 4.0 ms; block 128 @ 44100 Hz = 2902 us budget
+  21 one-shot trigger(s) excluded from the sweep, fired in their own stage
 stage               mean%     p99%     max%  threads%    peak
-idle                  4.3     22.6     39.0       0.0    0.00
-1 voices              4.3     22.6     36.3       0.0    0.00
-4 voices              4.3     22.7     46.3       0.0    0.00
-8 voices              4.3     22.7     34.9       0.0    0.00
-16 voices             4.3     22.6     37.2       0.0    0.00
-q-link sweep         10.0     42.1     58.7       0.0    0.00
-release tail          4.4     23.0     37.4       0.0    0.00
-worst p99 42.1%, worst block 58.7%, background threads up to 0.0% of a core -> FAIL
-{"plugin":"/tmp/cadenza.so","instrument":1,"open_ms":5.0,"p99_pct":42.1,"max_pct":58.7,"threads_pct":0.0,"verdict":"FAIL"}
+idle                  4.0      4.7     19.8       0.0    0.00
+1 voices              4.0      4.7     17.4       0.0    0.00
+4 voices              4.0      4.7     17.6       0.0    0.00
+8 voices              4.0      4.6     17.5       0.0    0.00
+16 voices             4.0      4.7     17.3       0.0    0.00
+q-link sweep         10.1     24.2     65.5       0.0    0.00
+release tail          4.1      4.8     18.0       0.0    0.00
+trigger fire          5.0     17.1     27.5       0.0    0.00
+worst p99 24.2%, worst block 65.5%, background threads up to 0.0% of a core, trigger max 27.5% of a block -> WARN
+{"plugin":"/tmp/cadenza.so","instrument":1,"open_ms":4.0,"p99_pct":24.2,"max_pct":65.5,"threads_pct":0.0,"verdict":"WARN","triggers":21,"trigger_max_pct":27.5}

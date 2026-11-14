@@ -21,6 +21,7 @@ LANES = [  # the skin's lanes: name, colour (lane 4, Melody 2, is retired in 0.7
     ("MELODY", (60, 198, 168)),
 ]
 UNUSED = "(unused) "   # a retired param's name prefix, so MPC's lists show it as retired
+QLINKS_PLAY = ("cx_1", "cx_2", "cx_3", "swing", "gate", "dyn")   # Force knobs 1-6 on PLAY
 PARAM_LANES = ["CHORDS", "BASS", "MELODY 1", "MELODY 2"]   # the four lanes params.json was built from: append only, so they stay
 STEPS, CHORD_TILES = 16, 8
 
@@ -981,6 +982,16 @@ def make_params():
     for q in p:   # 0.9: the chord strip (chord_1..8) left the skin with the old CHORDS tab; unpolled, it costs no audio-thread time
         if q["key"].startswith("chord_") and q["key"] != "chord_len":
             q["poll"] = False
+    qlinked = set(QLINKS_PLAY) | set(QLINKS_24[0]) | set(QLINKS_24[1]) | {k for _, k in JAM_KNOBS}   # every tab's qlinks line
+    for q in p:
+        # 0.28.1: no toolchain debounce (default 250 ms since its e5387f3): a stepper or UNDO tapped fast acts every time, as in 0.28.0
+        if q.get("momentary"):
+            q["debounce_ms"] = 0
+        # 0.28.1: since the toolchain's #486 a plain write asks MPC for no UpdateDisplay, so the Q-Links move a param on the track's
+        # automation screen. The Q-Linked knobs take that; every other param keeps the redraw at once (a tap changes the cells,
+        # names and readouts around it), as in 0.28.0
+        if q["key"] not in qlinked:
+            q["refresh_display"] = True
     json.dump({"name": "Cadenza", "params": p}, open(os.path.join(HERE, "params.json"), "w"), indent=1)
     write_keyflags(p)
     return len(p)
@@ -1071,7 +1082,7 @@ def play_tab(a):
     for i, (label, colour, key) in enumerate(knobs):
         name(a, 140 + 200 * i, KNOB_Y - 50, label, colour, "center")
         knob(a, 140 + 200 * i, KNOB_Y, key)
-    a('qlinks "PLAY" = cx_1,cx_2,cx_3,swing,gate,dyn')
+    a('qlinks "PLAY" = %s' % ",".join(QLINKS_PLAY))
 
 
 MD_X = L + 120                  # the lane tabs' mode cells, right of the 2.4 title (CHORDS is about 105 px)

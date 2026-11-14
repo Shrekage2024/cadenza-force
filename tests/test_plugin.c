@@ -690,7 +690,8 @@ static void test_tap_more(void) {
     CHECK(e->getP(e, idx("fol_1")) > 0.5f && !strcmp(b, "Bar 4") && e->getP(e, idx("bar_2")) > 0.5f && e->getP(e, idx("bar_4")) < 0.5f,
           "after 0.16 a bar tap keeps FOLLOW (GLOBAL): bar 4 picked, the strip stays on the playing bar 2 (view '%s')", b);
     e->setP(e, idx("fol_1"), 0.0f);   /* FOLLOW off (GLOBAL), then the pick: the rest of this test's state */
-    run(e, 2, 1);                     /* the wrapper polls bar_4 dark again, so the tap is not an echo */
+    run(e, 4, 1);                     /* the wrapper polls bar_4 dark again, so the tap is not an echo (0.28.1: a whole 10 ms pass, which
+                                       * the toolchain now spreads over the blocks) */
     e->setP(e, idx("bar_4"), 1.0f);
     CHECK(e->getP(e, idx("fol_1")) < 0.5f && e->getP(e, idx("bar_4")) > 0.5f, "FOLLOW off: a bar tap shows that bar");
     run(e, 4, 0);
@@ -1878,7 +1879,7 @@ static void test_14_keys(void) {
         snprintf(key, sizeof key, "fsl_%d", i);
         ok &= PARAMS[idx(key)].no_poll;
     }
-    CHECK(ok && polled == 784, "fs_1..8 and fsl_1..4 are unpolled; %d polled cells (0.13: 359; 0.14: 368; VST-12: +15 phrasing, -2 mph_; "
+    CHECK(ok && polled == 772, "fs_1..8 and fsl_1..4 are unpolled; %d polled cells (0.13: 359; 0.14: 368; VST-12: +15 phrasing, -2 mph_; "
           "0.16: +38 FIX by bar; 0.17: +132 the CHORDS page, -37 IDEAS and SHAPE; 0.18: +61 the RHYTHM page, -11 crh_, cnr_ and new_1, "
           "+16 rcp_; 0.19: +151 the BASS page and its KEYS (ucw, never placed, unpolled), -92 BASS IDEAS, SHAPE and FIX A NOTE, +81 the "
           "BASS RHYTHM page; 0.20: +101 the MELODY JAM page and its KEYS (jnow, jnext, jmsg unpolled), -124 MELODY RECIPE, IDEAS, SHAPE, "
@@ -1887,7 +1888,8 @@ static void test_14_keys(void) {
           "0.24: +15 OCTAVE, GLOBAL's NAMES and the sound pages' bars and EDIT BARS, -113 the FIX mode cell, NAMES, the CHORDS strip, paging, "
           "picker, FIX cells and old centre texts, the BASS strip, paging, editor and old centre texts; Task 7 +137 the PHRASE pages' cells that light "
           "and their RHYTHM fields: the strips, LOCK WITH, ANTICIPATE, paints, steps, pickers, COPY TO...'s bars, -126 the RHYTHM pages' cells "
-          "they replace: rst_, rpt_, rfl_, csr_, rcb_, rcp_, rtt and their BASS RHYTHM twins, ysc_ too)", polled);
+          "they replace: rst_, rpt_, rfl_, csr_, rcb_, rcp_, rtt and their BASS RHYTHM twins, ysc_ too; 0.28.1: -12 the retired rac_ and yac_, "
+          "as the toolchain now polls only what the layout shows)", polled);
     static const char *const TAPK[] = {"fbs_", "fbar_", "fs_", "fsl_"};
     static const int TAPN[] = {4, 16, 8, 4};
     ok = 1;
@@ -2555,8 +2557,9 @@ static void test_18_rview(void) {
 static void test_18_params_appended(void) {
     static const char *const QUIET[] = {"crh_1", "crh_9", "cnr_1", "k_vcol", "k_vinv", "k_vspr", "k_vstr", "new_1", "rnote", "rmsg",
                                         "rfll", "rcnote", "rctl", "rbp_1", "rbf_4", "rcx_1", "rcx_4", "rst_1", "rst_16", "rpt_1", "rfl_2", "csr_1",
-                                        "rcb_16", "rtt", "rcp_1", "rcp_16"};   /* 0.24 Task 7: PHRASE's own cells replace the step row .. COPY TO...'s bars */
-    static const char *const LOUD[] = {"rac_6", "rbg_6", "rbt_4"};
+                                        "rcb_16", "rtt", "rcp_1", "rcp_16", "rac_6"};   /* 0.24 Task 7: PHRASE's own cells replace the step row .. COPY TO...'s bars;
+                                                                     * 0.28.1 rac_ (retired in 0.24.1): the toolchain polls only what the layout shows */
+    static const char *const LOUD[] = {"rbg_6", "rbt_4"};
     static const char *const BAD[] = {"rst_0", "rst_17", "rpt_6", "rac_7", "rfl_4", "csr_5", "rcb_17", "rcx_5", "rbg_7", "rbt_5",
                                       "rbp_5", "rbf_0", "rcp_0", "rcp_17", "k_s0", "k_s9", "k_s2x", "k_s5_on", "rtt_on", "rmsgx", "rcnote_1"};
     static const int SN[4] = {6, 6, 5, 17}, SD[4] = {3, 1, 1, 0};   /* 0.22 JAM's defaults (the tab opens there) */
@@ -3167,9 +3170,9 @@ static void test_19_params_appended(void) {
     static const char *const QUIET[] = {"uett", "uent", "umsg", "ubtl", "utp_1", "utp_4", "ynote", "ymsg", "yfll", "ycnote", "yctl",
                                         "ybp_1", "ybf_4", "ycx_1", "ycx_4", "uts_1", "uts_4", "ucw",
                                         "ust_1", "ust_4", "usr_1", "upg_2", "uea_5", "ues_16", "unk_12", "uno_4", "uer_1", "upage", "ucn", "uwh",
-                                        "utn"};   /* 0.24 the BASS page's strip, paging, old centre and bar editor: retired */
+                                        "utn", "yac_6"};   /* 0.24 the BASS page's strip, paging, old centre and bar editor: retired; 0.28.1 yac_ (retired in 0.24.1) */
     static const char *const LOUD[] = {"ubm_1", "ukw_1", "ukb_25", "uke_2", "usy_2", "upd_3", "uoc_1", "uct_1", "ugn_12", "uti_4",
-                                       "ucnt", "ufol", "ustn", "ustg", "yac_6", "ybg_6", "ybt_4"};
+                                       "ucnt", "ufol", "ustn", "ustg", "ybg_6", "ybt_4"};
     static const char *const QUIET24[] = {"yst_1", "yst_16", "ypt_5", "yfl_2", "ysr_1", "ysc_4", "ycb_16", "ycp_1", "ycp_16", "ytt"};   /* 0.24 Task 7:
                                                                                                     * PHRASE's own cells replace them */
     static const char *const BAD[] = {"ubm_0", "ubm_4", "ust_5", "ust_0", "tint_5", "tint_9", "utp_5", "ukw_36", "ukb_26",

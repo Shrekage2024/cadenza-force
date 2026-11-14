@@ -23,9 +23,14 @@ const char *bass_genre_name(int g);
 bass_set_t bass_style_set(int i);
 int bass_set_edited(const bass_set_t *s);   /* 1 when pedal, octave or a k differs from the style's; 0 for style -1 */
 
-typedef struct { int root, third, minor; } bass_chord_t;   /* pitch classes of the root and the 3rd; minor 0/1 */
+/* pitch classes of the root and the 3rd; minor 0/1; lift: semitones from the root up to the chord's own note, the one its root role
+ * plays and the line walks into (0: the root; the Bass's Feel page) */
+typedef struct { int root, third, minor, lift; } bass_chord_t;
+static inline int bass_home(const bass_chord_t *c) { return (c->root + c->lift) % 12; }
 typedef struct { int tonic; int scale[7]; } bass_key_t;    /* pitch classes: the tonic, and the scale from the tonic */
 
+int bass_in_scale(const bass_key_t *k, int pc);
+int bass_pedal_pc(const bass_set_t *s, const bass_key_t *k);   /* PEDAL's pitch class, -1 off */
 /* The nearest scale pitch class going down / up by semitones from pc, not pc itself. */
 int bass_scale_below(const bass_key_t *k, int pc);
 int bass_scale_above(const bass_key_t *k, int pc);
@@ -43,6 +48,14 @@ typedef struct {
 /* Writes span entries. note: MIDI 1..127, or 0 for silent. role: 1 root, o root up an octave, 3, 5, p scale step,
  * c half step, P pedal, f fixed, - held, . rest. */
 void bass_span(const bass_span_in_t *in, unsigned char note[], char role[]);
+
+/* A hit's picked note, held in bass_state_t.fix above any MIDI note: a tone of the chord (TONE_R..TONE_7, theory.h) or the half step below (BP_BELOW)
+ * or above (BP_ABOVE) the next chord's note, and an octave -1..1 */
+enum { BP_BELOW = 8, BP_ABOVE, BASS_PICK_BASE = 128, BASS_PICK_LAST = 154 };
+static inline int bass_is_pick(int code) { return code >= BASS_PICK_BASE && code <= BASS_PICK_LAST; }
+static inline int bass_pick_code(int tone, int oct) { return BASS_PICK_BASE + (tone - 1) * 3 + oct + 1; }
+static inline int bass_pick_tone(int code) { return (code - BASS_PICK_BASE) / 3 + 1; }
+static inline int bass_pick_oct(int code) { return (code - BASS_PICK_BASE) % 3 - 1; }
 
 /* 0.24 the note pitch class pc plays as a root in settings s (REGISTER's fold and OCTAVE, no octave jump): MIDI 1..127 */
 int bass_root_note(const bass_set_t *s, int pc);

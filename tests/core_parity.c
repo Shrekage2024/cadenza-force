@@ -70,6 +70,18 @@ static void pass(double rate, int frames) {
     seq_set_channel(&s, LANE_CHORDS, 10);
     ppq = play(&s, ppq, 120, 2, frames);
     seq_all_notes_off(&s);
+    printf("> song: Pop, Edit mode on row 1 (the Verse, its melody muted), its Mute key, back to song\n");
+    seq_set_channel(&s, LANE_CHORDS, 2);
+    seq_arr_set_form(&s, 0);
+    seq_arr_jump(&s, 0);
+    ppq = play(&s, ppq, 120, 4, frames);
+    seq_arr_edit(&s, 1);                                       /* 0.27.1 held with the row's own mutes: no melody */
+    ppq = play(&s, ppq, 120, 12, frames);
+    seq_arr_set_row_mute(&s, 1, LANE_MEL_UP, 0);               /* the Edit page's Mute key: heard at once */
+    ppq = play(&s, ppq, 120, 8, frames);
+    seq_arr_edit(&s, -1);                                      /* back to song: the mutes kept, the pass its last */
+    ppq = play(&s, ppq, 120, 24, frames);   /* (the rows' mutes afterwards: tests/test_core.c, test_arr_edit_hold) */
+    seq_all_notes_off(&s);
     printf("> end %ld blocks\n", blocks);
 }
 

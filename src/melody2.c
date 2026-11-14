@@ -6,8 +6,8 @@
 #define MAXN 32   /* notes in a cell: a block has at most 16, a fill adds 4 */
 
 /* A cell note: step p, scale degree d, length in steps. ped: the PEDAL note, which plays its scale note (never a chord-tone
- * slot) for as long as it moves only by octaves. */
-typedef struct { int p, d, len, ped; } mn_t;
+ * slot) for as long as it moves only by octaves. pick: a picked note's pitch class + 1, 0 none (land). */
+typedef struct { int p, d, len, ped, pick; } mn_t;
 typedef struct { int n; mn_t x[MAXN]; } cell_t;
 /* A chord as the model sees it: r its root's scale degree in -3..3, pc its root, 3rd and 5th, mi a minor 3rd */
 typedef struct { int r, pc[3], mi; } mch_t;
@@ -42,7 +42,7 @@ const char *mjam_var_name(int v) { return VAR_NAME[clampi(v, 0, 3)]; }
 const char *mjam_time_name(int t) { return TIME_NAME[clampi(t, -1, 1) + 1]; }
 
 mjam_set_t mjam_default(void) {
-    mjam_set_t s = {MJ_ARP, 0, MF_LOOP, 0, 3, 0, MA_ECHO, 1, 0, 1, MJ_RUN, 2, 0, 0, 0, 0};
+    mjam_set_t s = {MJ_ARP, 0, MF_LOOP, 0, 3, 0, MA_ECHO, 1, 0, 1, MJ_RUN, 2, 0, 0, 0, 0, 0};
     return s;
 }
 
@@ -87,6 +87,7 @@ void mjam_chord_of(int key, int scale, int slot_scale, int deg, mjam_chord_t *ou
     out->root = n[0] % 12;
     out->third = n[1] % 12;
     out->fifth = n[2] % 12;
+    for (int t = 0; t < 7; t++) out->tone[t] = theory_degree_pc(key, slot_scale, deg + t);
 }
 
 /* ---- chords and pitch ---- */
@@ -110,6 +111,7 @@ static int scale_midi(const mjam_loop_in_t *in, int d) { return 60 + in->key + 1
 /* A chord-tone slot of the bar's chord plays that tone of the chord under the note, nearest the slot's scale note */
 static int note_midi(const mjam_loop_in_t *in, const mch_t *bar, const mch_t *under, const mn_t *x) {
     int m = scale_midi(in, x->d), k = pmod(x->d - bar->r, 7);
+    if (x->pick) return m + pmod(x->pick - 1 - m + 6, 12) - 6;
     if (x->ped || !((0x15 >> k) & 1)) return m;
     return m + pmod(under->pc[k / 2] - m + 6, 12) - 6;
 }
@@ -242,7 +244,7 @@ static void block(const mjam_loop_in_t *in, int c, int l, int b, cell_t *o) {
     for (int i = 0; i < BLOCK[c][l].n; i++) {
         const pat_t *x = &BLOCK[c][l].x[i];
         int d = x->base == B_PK ? pent(in->scale, v[B_PK] + x->off) : v[(int)x->base] + x->off;
-        add(o, (mn_t){x->p, d, x->len, x->base == B_P});
+        add(o, (mn_t){x->p, d, x->len, x->base == B_P, 0});
     }
 }
 
@@ -278,7 +280,7 @@ static int last_note(const cell_t *c, int skip) {   /* the first of the latest n
 /* the last note moves to the nearest degree deg (-1: none); a note before it on the same degree steps up */
 static void end_on(cell_t *c, int deg) {
     int L = last_note(c, -1), prev, best;
-    if (L < 0 || deg < 0) return;
+    if (L < 0 || deg < 0 || c->x[L].pick) return;   /* a pick beats CADENCE */
     best = c->x[L].d;
     for (int k = 0; k <= 3; k++) {
         if (!pmod(c->x[L].d - k - deg, 7)) { best = c->x[L].d - k; break; }
@@ -488,7 +490,7 @@ static void filled(cell_t *c) {
         if (span >= 2) {
             int d = x->d, t = k + 1 < n0 ? c->x[ord[k + 1]].d : d + 1, nd = iabs(t - d) >= 2 ? d + (t > d ? 1 : -1) : t >= d ? d + 1 : d - 1;
             x->len = len < span / 2 ? len : span / 2;
-            add(c, (mn_t){x->p + span / 2, nd, len < span - span / 2 ? len : span - span / 2, 0});
+            add(c, (mn_t){x->p + span / 2, nd, len < span - span / 2 ? len : span - span / 2, 0, 0});
         }
     }
 }
@@ -531,7 +533,42 @@ static void time_k(const mjam_set_t *s, const mch_t *ch, cell_t *c) {
     snap_marked(c, ch, mark);
 }
 
-/* the bar's notes with NEW BAR, VARIATION, RANGE, DENSITY and 0.21 TIME: before breath, cadence, fill and register */
+/* The earliest note in steps from..to-1, -1 none */
+static int first_in(const cell_t *c, int from, int to) {
+    int first = -1;
+    for (int i = 0; i < c->n; i++)
+        if (c->x[i].p >= from && c->x[i].p < to && (first < 0 || c->x[i].p < c->x[first].p)) first = i;
+    return first;
+}
+
+/* A pick on the span from..to-1 of chord ch: the span's first note lands on it, the rest keep their shape from there */
+static void land_span(const mjam_loop_in_t *in, const mjam_chord_t *ch, int code, int from, int to, cell_t *c) {
+    int first = first_in(c, from, to), tone = code & 15, oct = (code >> 4) - 1, delta;
+    mch_t u;
+    if (first < 0 || tone < 1 || tone > 7) return;
+    chord_info(in, ch, &u);
+    delta = near(u.r + tone - 1, c->x[first].d) + 7 * oct - c->x[first].d;
+    for (int i = 0; i < c->n; i++) {
+        mn_t *x = &c->x[i];
+        if (x->p < from || x->p >= to) continue;
+        set_d(x, x->d + delta);
+        if (i != first && !(x->p % 4) && !is_ct(x->d, &u)) set_d(x, is_ct(x->d - 1, &u) ? x->d - 1 : x->d + 1);
+    }
+    c->x[first].pick = ch->tone[tone - 1] + 1;
+}
+
+static void lands(const mjam_loop_in_t *in, const mjam_set_t *s, int b, cell_t *c) {
+    if (!in->land || s->c == MJ_PEDAL) return;
+    b = pmod(b, in->bars);
+    for (int i = 0; i < SEQ_STEPS; i++) {
+        int z = i + 1;
+        if (!in->land[b][i]) continue;
+        while (z < SEQ_STEPS && in->bar[b].chord[z] == in->bar[b].chord[i]) z++;
+        land_span(in, in->bar[b].chord[i], in->land[b][i], i, z, c);
+    }
+}
+
+/* the bar's notes with NEW BAR, VARIATION, RANGE, DENSITY, 0.21 TIME and the picks: before breath, cadence, fill and register */
 static void shaped_bar(const mjam_loop_in_t *in, const mjam_set_t *s, int b, int v, cell_t *o) {
     mch_t ch;
     bar_chord(in, b, &ch);
@@ -540,6 +577,7 @@ static void shaped_bar(const mjam_loop_in_t *in, const mjam_set_t *s, int b, int
     range(s, &ch, o);
     density(s, &ch, o);
     time_k(s, &ch, o);
+    lands(in, s, b, o);
 }
 
 /* LOOP's phrase end: each phrase's bar 4, and the last bar of a loop that is not a multiple of 4 bars (so a 1-, 2-, 3- or 6-bar
@@ -547,12 +585,20 @@ static void shaped_bar(const mjam_loop_in_t *in, const mjam_set_t *s, int b, int
 static int loop_end(int b, int bars) { return pmod(b, 4) == 3 || (bars % 4 && b == bars - 1); }
 
 /* CADENCE: the last note of a call (before an answer) and of an answer (before the next call); LOOP: its phrase end (loop_end) */
-static void cadence(const mjam_set_t *s, int b, int bars, cell_t *c) {
+static int cad_on(const mjam_loop_in_t *in, const mjam_set_t *s, int b, const cell_t *c, int deg) {   /* cadc: that note if the chord under the last note holds it, else the beat rule's */
+    int L = last_note(c, -1);
+    mch_t u;
+    if (!s->cadc || deg < 0 || L < 0) return deg;
+    chord_info(in, in->bar[pmod(b, in->bars)].chord[clampi(c->x[L].p, 0, SEQ_STEPS - 1)], &u);
+    return is_ct(deg, &u) ? deg : pmod(is_ct(deg - 1, &u) ? deg - 1 : deg + 1, 7);
+}
+
+static void cadence(const mjam_loop_in_t *in, const mjam_set_t *s, int b, int bars, cell_t *c) {
     static const signed char CALL[4] = {-1, 1, 4, 4}, ANS[4] = {-1, 4, 2, 0};
     int pos = pmod(b, 4), role = role_at(s->form, pos), next = role_at(s->form, pos + 1);
-    if (s->form == MF_LOOP) { if (loop_end(b, bars)) end_on(c, ANS[(int)s->cad]); }
-    else if (role == 'A' && next != 'A') end_on(c, ANS[(int)s->cad]);
-    else if (role != 'A' && next == 'A') end_on(c, CALL[(int)s->cad]);
+    if (s->form == MF_LOOP) { if (loop_end(b, bars)) end_on(c, cad_on(in, s, b, c, ANS[(int)s->cad])); }
+    else if (role == 'A' && next != 'A') end_on(c, cad_on(in, s, b, c, ANS[(int)s->cad]));
+    else if (role != 'A' && next == 'A') end_on(c, cad_on(in, s, b, c, CALL[(int)s->cad]));
 }
 
 /* breath and fill come before each answer (in LOOP: before bar 1 comes round, loop_end) */
@@ -560,6 +606,8 @@ static int gap_bar(const mjam_set_t *s, int b, int bars) {
     int pos = pmod(b, 4);
     return s->form == MF_LOOP ? loop_end(b, bars) : role_at(s->form, pos) != 'A' && role_at(s->form, pos + 1) == 'A';
 }
+
+int mjam_gap_bar(const mjam_set_t *s, int b, int bars) { mjam_set_t o = sane(s); return gap_bar(&o, b, bars); }
 
 /* nf: the next bar's first degree, for FILL (has_nf 0: the next bar is silent); 0.21 odd (if not NULL): 1 when the shaped bar, before
  * breath, cadence and fill, has a note on an odd step (the swing grid's test) */
@@ -571,11 +619,11 @@ static void bar_notes(const mjam_loop_in_t *in, const mjam_set_t *s, int b, int 
     shaped_bar(in, s, b, v, o);
     if (odd) for (int i = 0; i < o->n; i++) *odd |= o->x[i].p % 2;
     if (gap && (br || fl)) cut_at(o, 16 - (br > room ? br : room));
-    cadence(s, b, in->bars, o);
+    cadence(in, s, b, in->bars, o);
     if (gap && has_nf)
         for (int k = 0; k < fl; k++) {
             const signed char *f = FILL_NOTE[(int)s->fill][k];
-            add(o, (mn_t){f[0], nf + f[1], f[2], 0});
+            add(o, (mn_t){f[0], nf + f[1], f[2], 0, 0});
         }
     shift(o, 7 * (s->reg - 1));
 }
@@ -595,11 +643,13 @@ static int note_tension(const mjam_loop_in_t *in, int m, const mch_t *u, int p) 
 }
 
 int mjam_tension(int key, int scale, const mjam_chord_t *ch, int note, int step) {
-    mjam_loop_in_t in = {key, scale, 1, mjam_default(), 0, 0};
+    mjam_loop_in_t in = {key, scale, 1, mjam_default(), 0, 0, 0};
     mch_t u;
     chord_info(&in, ch, &u);
     return note_tension(&in, note, &u, step);
 }
+
+int mjam_fold(int m) { return fold36(m); }
 
 static void to_line(const mjam_loop_in_t *in, int b, const cell_t *c, int fold, mjam_note_t out[SEQ_STEPS]) {
     const mjam_bar_in_t *bi = &in->bar[b];
@@ -625,21 +675,55 @@ static void to_line(const mjam_loop_in_t *in, int b, const cell_t *c, int fold, 
     }
 }
 
-static void bar_line(const mjam_loop_in_t *in, int b, const mjam_set_t *set, int fold, mjam_note_t out[SEQ_STEPS], int *odd) {
+/* Bar b's cell, b in the loop, as it goes into its line */
+static void bar_cell(const mjam_loop_in_t *in, int b, const mjam_set_t *set, cell_t *c, int *odd) {
     mjam_set_t s, live;
-    cell_t nx, c;
+    cell_t nx;
     int first = -1;
-    if (odd) *odd = 0;
-    if (in->bars < 1) { for (int i = 0; i < SEQ_STEPS; i++) out[i] = (mjam_note_t){0, 0, 0}; return; }
-    b = pmod(b, in->bars);
     s = sane(set);
     live = sane(&in->set);
     if (s.fill && gap_bar(&s, b, in->bars)) {   /* 0.21 only a FILL needs the next bar's first note (setter cost) */
         shaped_bar(in, &live, (b + 1) % in->bars, 0, &nx);
         for (int i = 0; i < nx.n; i++) if (first < 0 || nx.x[i].p < nx.x[first].p) first = i;
     }
-    bar_notes(in, &s, b, in->v ? in->v[b] : 0, first >= 0, first >= 0 ? nx.x[first].d : 0, &c, odd);
+    bar_notes(in, &s, b, in->v ? in->v[b] : 0, first >= 0, first >= 0 ? nx.x[first].d : 0, c, odd);
+}
+
+static void bar_line(const mjam_loop_in_t *in, int b, const mjam_set_t *set, int fold, mjam_note_t out[SEQ_STEPS], int *odd) {
+    cell_t c;
+    if (odd) *odd = 0;
+    if (in->bars < 1) { for (int i = 0; i < SEQ_STEPS; i++) out[i] = (mjam_note_t){0, 0, 0}; return; }
+    b = pmod(b, in->bars);
+    bar_cell(in, b, set, &c, odd);
     to_line(in, b, &c, fold, out);
+}
+
+void mjam_land_notes(const mjam_loop_in_t *in, int b, const mjam_set_t *set, int from, int to, unsigned char out[MJ_LAND_NOTES]) {
+    mjam_loop_in_t plain = *in;
+    const mjam_bar_in_t *bi;
+    const mjam_chord_t *ch;
+    mch_t bar, u;
+    cell_t c;
+    int first;
+    for (int i = 0; i < MJ_LAND_NOTES; i++) out[i] = 0;
+    if (in->bars < 1 || from < 0 || to > SEQ_STEPS || from >= to) return;
+    b = pmod(b, in->bars);
+    plain.land = 0;
+    bar_cell(&plain, b, set, &c, 0);
+    first = first_in(&c, from, to);
+    if (first < 0) return;
+    bi = &in->bar[b];
+    ch = bi->chord[from];
+    chord_info(in, bi->chord[0], &bar);
+    chord_info(in, ch, &u);
+    out[0] = (unsigned char)fold36(note_midi(in, &bar, &u, &c.x[first]));
+    for (int t = 1; t <= 7; t++)
+        for (int oct = -1; oct <= 1; oct++) {
+            mn_t x = c.x[first];
+            x.d = near(u.r + t - 1, x.d) + 7 * oct;
+            x.pick = ch->tone[t - 1] + 1;
+            out[MJ_LAND_AT(t, oct)] = (unsigned char)fold36(note_midi(in, &bar, &u, &x));
+        }
 }
 
 void mjam_bar(const mjam_loop_in_t *in, int b, const mjam_set_t *set, mjam_note_t out[SEQ_STEPS]) { bar_line(in, b, set, 1, out, 0); }

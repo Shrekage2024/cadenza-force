@@ -15,7 +15,7 @@ static int fails;
 #define CHECK(c, ...) do { printf("%s ", (c) ? "ok  " : "FAIL"); printf(__VA_ARGS__); printf("\n"); if (!(c)) fails++; } while (0)
 
 static const bass_key_t EMIN = {4, {4, 6, 7, 9, 11, 0, 2}};
-static const bass_chord_t EM = {4, 7, 1}, C_MAJ = {0, 4, 0};
+static const bass_chord_t EM = {4, 7, 1, 0}, C_MAJ = {0, 4, 0, 0};
 
 static int hits(const char *s) { int n = 0; for (int i = 0; s[i]; i++) n += s[i] == 'x' || s[i] == 'A' || s[i] == 'g'; return n; }
 

@@ -56,6 +56,7 @@ _Static_assert(LSHAPE_COUNT >= SHAPE_COUNT && LSHAPE_COUNT >= BSHAPE_COUNT, "LSH
  * the host block seq_block is playing (0 .. frames - 1), for a host that places notes sample-accurately; 0 for an event sent
  * outside a block (a setter's note-offs, seq_all_notes_off). The Force places every event at the block's start (engine.c). */
 typedef void (*seq_emit_fn)(void *ctx, int status, int note, int vel, int frame);
+typedef void (*seq_step_fn)(void *ctx, long k);   /* VST-66 seq_set_step_fn */
 
 typedef struct {
     int status_off;   /* 0x80 | channel */
@@ -127,7 +128,7 @@ enum { AN_OFF, AN_16, AN_8, AN_BEAT };
 /* 0.24 a drawn lane's rendered step's flags (seq_part_t.sflag, seq_step_flags): SF_ADDED a knob added the hit (not in the drawn codes:
  * COMPLEXITY, SYNC, GHOSTS, JAM's TIME and VARIATION, ANTICIPATE), SF_EARLY ANTICIPATE's early hit (SF_ADDED too), SF_TIED the change
  * step it ties over (a hold) */
-enum { SF_ADDED = 1, SF_EARLY = 2, SF_TIED = 4 };
+enum { SF_ADDED = 1, SF_EARLY = 2, SF_TIED = 4, SF_STRUCK = 8 };   /* SF_STRUCK 0.28.1: a Feel chord's hit from a hold (feel_strike), SF_ADDED too */
 #define CHORDS_CX_NEUTRAL 50   /* 0.18: the Chords lane's COMPLEXITY that plays the bars as drawn (new instances, INIT, RESET) */
 #define BASS_CX_NEUTRAL 50     /* 0.19: the Bass lane's, the same */
 /* 0.19 a GEN_BASS_DRAWN Bass lane's notes (bassline.h; seq_part_t.bass). set: the part's note settings; a note-locked bar (nlock
@@ -137,7 +138,8 @@ typedef struct {
     bass_set_t set;
     bass_set_t frozen[SEQ_MAX_BARS];
     unsigned short nlock;
-    unsigned char fix[SEQ_LANE_STEPS];
+    unsigned char fix[SEQ_LANE_STEPS];   /* above any MIDI note: a pick that follows the chord (bassline.h) */
+    unsigned char ftone[SEQ_MAX_BARS][SEQ_STEPS + 1];   /* a note-locked bar's chord tones (seq_feel_slot_t.tone) per step, then the next chord's; saved as `2.bf=` */
 } bass_state_t;
 
 /* 0.20 a GEN_MEL_JAM Melody lane's notes (melody2.h; seq_part_t.mjam). set: the part's melody settings; a locked bar (nlock bit b)
@@ -156,6 +158,9 @@ typedef struct {
                                  * acc stays LIGHT (1), its velocities fixed (no knob sets it; a load keeps 1) */
     unsigned char weak;         /* 0.21 MW_* bits: the knobs whose current step changes little here (render_mel; the knob text says "weak") */
     unsigned char grid16;       /* 0.21 1 when the loop swings on 16ths, 0 on 8ths (mjam_swing16; render_mel) */
+    unsigned char early;        /* Early: a chord's first note 0, 1, 2 or 4 steps ahead of it, ringing over the change (AN_STEPS); 0 off. Saved as `3.je=` */
+    unsigned char loose;        /* Loose 0..4: HUMANIZE's delay and velocity on each note. Saved as `3.je=` */
+    unsigned char fland[SEQ_MAX_BARS][SEQ_STEPS];   /* a locked bar's picks when it was locked (MJ_LAND_CODE), saved as `3.jt=` */
 } mjam_state_t;
 enum { MW_DENS = 1, MW_RNG = 2, MW_VAR = 4, MW_SWING = 8, MW_TIME = 16 };   /* 0.21 Amendment 1: TIME takes ACCENT's bit */
 #define MEL_JAM_CX 10   /* 0.20: a JAM Melody lane's COMPLEXITY (cx_3) at level 1: 20 x level + 10 (new instances, INIT) */
@@ -170,6 +175,20 @@ typedef struct { signed char c, l, sw, var, swing, tm; unsigned char grid16, wea
  * src 0 the scale, 1..3 a borrow, whose degree deg is) of type `type` (seq_rbar_type's 0 Knobs .. 4 6th; 0.24.2 5..9 7th, power, 9th,
  * 11th, 13th: a point THIS HIT ONLY makes of a slot of that colour) plays instead of the slot */
 typedef struct { signed char step, deg, src, type; } seq_cp_t;
+
+/* 0.28 Feel, per real slot: mute (the Chords lane is silent there; Bass and Melody play on); base, the chord as written before the Feel
+ * page changed it, 0 none (feel code: 1 + deg + 7 x (src + 52 x colour), deg 0 when src > 0); hand notes (Only this chord), final notes,
+ * none when hand_n is 0; pick, the slot's chord when base or hand was set: a slot that no longer plays it (another page's edit) drops them
+ * at revoice. Recipe (Every chord): n voices, each a role (TONE_*, the note's job in any chord) at the note nearest its reference */
+typedef struct {
+    unsigned short base, pick;
+    unsigned char mute;
+    unsigned char tone;   /* the Bass's note under this chord (TONE_*), 0 its root: follows the chord, saved as `<P>.bt=` */
+    unsigned char mtone;  /* the note the Melody lands on as this chord starts (TONE_*), 0 as the tune plays it: saved as `<P>.mt=` */
+    signed char moct;     /* and its octave around where the tune is, -1..1 */
+    signed char hand_n, hand[THEORY_CHORD_MAX];
+} seq_feel_slot_t;
+typedef struct { signed char n, note[THEORY_CHORD_MAX]; unsigned char role[THEORY_CHORD_MAX]; } seq_feel_recipe_t;
 
 typedef struct {
     int bars;                  /* 1, 2, 4, 8 or 16 */
@@ -248,6 +267,12 @@ typedef struct {
      * default. sflag: each rendered step's SF_* (the setters render it with the steps; djq_commit installs a queued block's) */
     signed char lw[DL_COUNT], an[DL_COUNT];
     unsigned char sflag[DL_COUNT][SEQ_LANE_STEPS];
+    /* 0.28 Feel (seq_feel_slot_t): saved as `<P>.cx=`, `<P>.vh=`, `<P>.vr=`, only when used */
+    seq_feel_slot_t fs[SEQ_MAX_PROG];
+    seq_feel_recipe_t rc;
+    unsigned char feel_spans;   /* a Feel write's chord_len under a bar: its slots are one chord's parts, so the Bass's spans end only where the
+                                 * chord changes (bar_harm), and 0.28.1 a Chords hold strikes a new chord (feel_strike). Older parts keep a span
+                                 * per slot and hold through, as they have always played. Saved as `<P>.fm=1` */
 } seq_part_t;
 
 /* 0.22 a JAM block queued on a drawn lane of the playing part (seq_t.djq[DL_*], seq_jam_queue): c, l the block (c < 0 nothing queued),
@@ -265,6 +290,7 @@ typedef struct {
     unsigned char grid16;
     char brole[SEQ_LANE_STEPS];
     bass_set_t bset, frozen[SEQ_MAX_BARS];
+    unsigned char ftone[SEQ_MAX_BARS][SEQ_STEPS + 1];
     unsigned short nlock;
     int vstyle, vmode, vcol, vinv, vspr, vstrdir, strum, oct, voicing;
     int voice[SEQ_SLOTS_ALL][THEORY_CHORD_MAX], voice_n[SEQ_SLOTS_ALL];   /* 0.24 the change points' too */
@@ -321,8 +347,12 @@ typedef struct {
     seq_cp_t cp[SEQ_MAX_BARS][SEQ_CP_MAX];   /* 0.24 the change points: a progression snapshot's undo restores them */
     signed char hoct[SEQ_MAX_BARS][16];      /* 0.24 the hit octaves: a drawn lane's snapshot's undo restores them (final review: the
                                               * Bass's too, the Chords following it lose those of the hits it takes away) */
-    unsigned char prog_too;                  /* 0.24 a PHRASE edit's lane snapshot whose undo restores the progression too (one step) */
+    unsigned char prog_too;                  /* 0.24 a PHRASE edit's lane snapshot whose undo restores the progression too (one step); 2: and
+                                              * the loop's length (bars), as seq_set_bars (Try and keep's Go back on Chords) */
     signed char lw[DL_COUNT], an;            /* 0.24 a Chords or Bass snapshot's: both lanes' LOCK WITH (a set may turn the other OWN), its ANTICIPATE */
+    seq_feel_slot_t fs[SEQ_MAX_PROG];        /* 0.28 a progression snapshot's undo restores them */
+    seq_feel_recipe_t rc;
+    unsigned char feel_spans;
 } seq_snap_t;
 
 /* 0.17 the CHORDS page's views. CVIEW_PROG / VOICE are open transactions (seq_cview); the user picks the others.
@@ -393,12 +423,24 @@ typedef struct { int view, rgroup, browse_genre, paging, hold_page, page_hand, c
 #define SEQ_KEY_HI 83
 typedef struct { uint64_t lit, fold; unsigned char edge[2]; } seq_keys_t;
 
+/* 0.27 the arrangement: the song order iOS's song page edits (docs/superpowers/specs/2026-11-01-ios-song-page-design.md). A row is a
+ * part played for `passes` of its own bars (passes x bars at most 64), with its own mutes (bit lane, LANE_CHORDS..LANE_MEL_UP); the
+ * same part may be in several rows. n 0: no song, every rule below off (0.26's behaviour). cur: the playing row, -1 none (removed);
+ * pass: its passes played; jump: a row queued for the next bar line, -1 none; follow: 1 the song moves on at the end of a row's last
+ * pass, 0 the row repeats (Loop part); edit: the row Edit mode holds, -1 none; next_row: the row a part button's queued part makes
+ * the playing one (seq_select_part), -1 none. Saved as `ar=` only when n > 0. */
+#define SEQ_ARR_MAX 32
+typedef struct { unsigned char part, passes, mute; } seq_arr_row_t;
+typedef struct { seq_arr_row_t row[SEQ_ARR_MAX]; int n, cur, pass, jump, follow, edit, next_row, fresh; } seq_arr_t;   /* fresh: the row's first
+                                                                                                    * step not yet played (not a pass end) */
+
 typedef struct {
     int key, scale;            /* the whole project's: 4 = E, SCALE_MINOR */
     int chan[SEQ_LANES];       /* each lane's MIDI channel, 1-16: 1, 2, 3 new; 2, 3, 4 for a state saved before 0.7 */
     int swing, gate, dyn;      /* the output stage, 0..100 each; neutral (0, 50, 50) plays exactly as 0.6 */
     seq_part_t part[SEQ_PARTS];
     int cur_part;              /* the playing part, which the setters edit */
+    seq_arr_t arr;             /* 0.27 the arrangement (the song order) */
     int queued;                /* the part seq_block switches to at the next bar line, -1 none */
     int used_mask, stale_mask; /* bit p: part p is in use; part p missed a key or scale change (catches up when selected) */
     long part_origin_k;        /* the 16th the playing part's bar 1 began on (0 after a stop); its position counts from it */
@@ -461,6 +503,14 @@ typedef struct {
     double rate;             /* the host's sample rate (seq_set_rate; 44100 until set: the Force's), for the length of a block in beats */
     double blk_start, blk_end;   /* the interval of song positions the block being played covers (frame_of): the emit frame of an event */
     int blk_frames, in_block;    /* its frame count; 1 while seq_block runs (an event outside one is sent at frame 0) */
+    /* VST-66 a host's own hand on the step loop (seq_set_step_fn; all 0 until a host sets them, none saved). step_fn: called on each step
+     * after the song's row, a part switch and queued blocks took over, right before the step fires, so what it does sounds on that step.
+     * halt_k: the loop stops before that step (no row change, nothing fired), halted says so, next_k stays on it. hold_k[lane] (k + 1, 0
+     * none): PUSH leaves the lane's step k alone, as it does for a queued block's boundary */
+    seq_step_fn step_fn;
+    void *step_ctx;
+    long halt_k, hold_k[SEQ_ACTIVE_LANES];
+    int halted;
     seq_part_t load_tmp;   /* seq_state_load parses here first, so a bad state changes nothing; per instance, since
                             * every plugin instance loads its own state and they must not share scratch */
     seq_part_t jam_tmp;    /* 0.22 a queued JAM block's scratch part (djq_render), per instance as load_tmp */
@@ -558,6 +608,43 @@ int  seq_part(const seq_t *s);                 /* the playing (and edited) part 
 int  seq_queued_part(const seq_t *s);          /* -1 when nothing is queued */
 void seq_select_part(seq_t *s, int part);      /* 0..SEQ_NPARTS-1, else ignored */
 int  seq_part_used(const seq_t *s, int part);
+
+/* 0.27 the arrangement (seq_arr_t). seq_arr_set: rows (n 0..SEQ_ARR_MAX; n 0 clears the song); map, for each row of the song before,
+ * its index in the new rows or -1 (removed): the playing row, a queued jump, the hold and a part button's row follow their rows, as
+ * the core has them now (an edit and a row change can cross). The playing row removed: its part plays on and the row that took its
+ * place (the first after the last) starts at the next bar line, at once when stopped. map NULL: a new song, no row playing until a
+ * jump or the end of the playing part's pass. Refused (0, nothing changes) for a bad n, row or map. Every part a row names comes into
+ * use as a selection would bring it (a copy of the Verse first, a stale part caught up). It never touches UNDO. A part made longer
+ * keeps its rows at most 64 bars (fewer passes). seq_arr_set_row_mute: a row's mute; on the playing row the playing part's too, at
+ * once. */
+int  seq_arr_set(seq_t *s, const seq_arr_row_t *rows, int n, const signed char *map);
+int  seq_arr_rows(const seq_t *s, seq_arr_row_t *out);   /* n (0: no song); out may be NULL */
+int  seq_arr_row(const seq_t *s);                        /* the playing row, -1 none */
+int  seq_arr_pass(const seq_t *s);                       /* passes of the playing row played */
+void seq_arr_set_follow(seq_t *s, int on);
+int  seq_arr_follow(const seq_t *s);
+void seq_arr_set_row_mute(seq_t *s, int row, int lane, int muted);
+/* seq_arr_jump: playing, row starts at the next bar line (a second jump replaces it; the queued or the playing row cancels it);
+ * stopped, at once. seq_arr_edit (Edit mode): holds row, jumping to it unless it plays, its part heard with the row's own mutes
+ * (0.27.1; seq_arr_set_row_mute and seq_set_mute on the held row are heard at once); -1 ends it: the playing row's mutes on its
+ * part, and while following its current pass is its last.
+ * seq_arr_next_steps: 16ths from the last played position to the next row change (a jump's bar line, else the end of the playing
+ * row's last pass while following and not held); -1 stopped, no song or none due. A part button (seq_select_part) with a song and
+ * no hold turns follow off; the playing row becomes the first row of that part after the playing one, -1 if none. */
+void   seq_arr_jump(seq_t *s, int row);
+int    seq_arr_jumping(const seq_t *s);   /* the queued row, -1 none */
+void   seq_arr_edit(seq_t *s, int row);
+int    seq_arr_editing(const seq_t *s);   /* the held row, -1 none */
+double seq_arr_next_steps(const seq_t *s);
+double seq_arr_row_steps(const seq_t *s);   /* 16ths played into the playing row, wrapping by the row (a held or looped row too); -1
+                                            * stopped or no row */
+/* The song forms: rows of part, bars, mute (bit lane) for the parts' default lengths; seq_arr_set_form lays one out in passes of each
+ * part's own bars (rounded up, at least 1, at most 64 bars) with no row playing (cur -1: a jump starts it) */
+#define SEQ_ARR_FORMS 5
+typedef struct { unsigned char part, bars, mute; } seq_form_row_t;
+int         seq_arr_form(int form, seq_form_row_t *out);   /* its rows (0: a bad form); out may be NULL */
+const char *seq_arr_form_name(int form);                   /* "Pop", "Club", "Ballad", "Rock", "Loop"; NULL out of range */
+int         seq_arr_set_form(seq_t *s, int form);          /* 1, 0 for a bad form */
 
 /* The generator (gen.h) on the playing part. Each regenerates what it changes; none runs on the audio thread.
  * An Answer on Melody 2 always takes Melody 1's steps as its lead (whatever Melody 1's style, Manual included), so
@@ -660,6 +747,54 @@ int seq_state_save(seq_t *s, char *buf, int len);
 int seq_state_load(seq_t *s, const char *str);   /* 1 if it was valid and applied; csq1 (v1) and csq2 */
 int seq_song_load(seq_t *s, const char *str);    /* 0.23 a csq2 state as seq_state_load, the MIDI channels and FOLLOW kept (a preset) */
 int seq_unsaved_parts(const seq_t *s);           /* bit p: the last save left part p out (it did not fit) */
+
+/* 0.28 the Feel page's verbs on the playing part's chords (a chord: a run of steps of one chord, mute, base and hand notes, read through
+ * slot_at, so PHRASE's change points show as chords). Each is one undo step, keeps the loop's length and revoices; none runs in seq_block.
+ * A verb that writes the chords stores them as slots, chord_len the largest of 32, 16, 8, 4 that fits every start, and clears the change
+ * points (an off-beat one goes to the nearest free quarter; a chord on the beat moves only to make room for one before it with no quarter
+ * left; only a loop with more chords than quarters loses one, the shortest off the beat). Pick, mute, hand and smooth move no time: on a loop with
+ * change points they write only the chord they change, so the points stay (a pick on a point changes the point; one that plays the chord before
+ * it goes), except a mute, hand notes or a colour no point type is on a point, which stores the slots as above. seq_feel_chords: the runs, in
+ * time order; returns the count.
+ *   pick    chord i plays this chord (the first change records the base; the base again clears it); its hand notes go
+ *   add     chord i (at least half a bar) shares its time with this new chord, after it
+ *   remove  chord i's time goes to the chord before (the first's to the next)
+ *   resize  dir +1 chord i takes time from the next, -1 gives it: half a bar where both can spare it, else a quarter
+ *   mute    chord i silent or not; align: chord i moves its start to a bar line (0: no room)
+ *   hit     0.28.1 chord i's bar gets a hit on the chord's first step, ringing to its end or the next hit (a chord with a hit there: nothing)
+ *   hand    chord i's notes by hand (n 1..6; 0 back to the voicing); smooth: chord i's next chord nearest chord i, as hand notes
+ *   recipe  n voices for every chord (0: none); every hand note goes; undo 0 for one step with seq_feel_voicing
+ *   shape   one voicing value (FS_*): every hand note and the recipe go, except for STRUM, which moves no note
+ *   voicing all six at once as Custom (a saved voicing); preset: a progression preset, always undoable, mutes and bases cleared */
+enum { FS_MODE, FS_COL, FS_INV, FS_SPR, FS_STR, FS_OCT, FS_COUNT };
+/* can_longer, can_shorter, can_align: what resize and align would do now, so a UI greys its keys by the core's rule. hits: 0.28.1 the Chords hits
+ * under it as they play (0: silent). can_hit: its first step has no drawn hit, so seq_feel_hit has something to add (0 with hits 0: a setting takes the hit away) */
+typedef struct { int slot, start, steps, deg, src, colour, mute, hand, base_deg, base_src, base_colour, has_base, can_longer, can_shorter, can_align, hits, can_hit, tone, mtone, moct; } seq_feel_chord_t;
+int  seq_feel_chords(const seq_t *s, seq_feel_chord_t *out, int max);
+void seq_feel_pick(seq_t *s, int i, int deg, int src, int colour);
+void seq_feel_add(seq_t *s, int i, int deg, int src, int colour);
+void seq_feel_remove(seq_t *s, int i);
+void seq_feel_resize(seq_t *s, int i, int dir);
+void seq_feel_mute(seq_t *s, int i, int on);
+void seq_feel_hit(seq_t *s, int i);
+int  seq_feel_align(seq_t *s, int i);
+void seq_feel_hand(seq_t *s, int i, int n, const int *notes);
+void seq_feel_smooth(seq_t *s, int i);
+void seq_feel_recipe(seq_t *s, int n, const int *roles, const int *notes, int undo);
+int  seq_feel_recipe_n(const seq_t *s);
+void seq_feel_shape(seq_t *s, int what, int v);
+int  seq_feel_shape_get(const seq_t *s, int what);
+void seq_feel_voicing(seq_t *s, int mode, int col, int inv, int spr, int str, int oct);
+void seq_feel_preset(seq_t *s, int i);
+/* Going through the presets from the JAM page, a turn at a time: as a knob, no undo step for each (only for leaving chords of your own, or notes
+ * placed by hand), and the loop keeps its length */
+void seq_feel_browse_preset(seq_t *s, int i);
+void seq_feel_browse_style(seq_t *s, int i);
+void seq_feel_audition(seq_t *s, int i);   /* chord i heard, as it stands after the verbs before it; a muted one stays silent */
+/* The slot's notes at SPREAD spr (the "hear it close, hear it wide" preview), as seq_slot_notes; a hash of everything the page shows, for
+ * the UI to read the chords again only when it moved */
+int  seq_feel_preview(const seq_t *s, int slot, int spr, int out[THEORY_CHORD_MAX]);
+unsigned seq_feel_hash(const seq_t *s);
 
 /* 0.9: per-slot chord quality, slot locks and the Chords lane's SHAPE, on the playing part. A slot plays the chord on its
  * degree from its scale (src) in its colour; every lane resolves through it at playback (gen.c is unchanged). Each setter
@@ -901,6 +1036,15 @@ int  seq_jam_queue(seq_t *s, int lane, int c, int l);
 int  seq_jam_queued(const seq_t *s, int lane, int *c, int *l);
 int  seq_jam_poll(seq_t *s);
 int  seq_jam_at_bar(const seq_t *s, int lane);   /* 0.22 the 0-based loop bar a queued block takes over at (seq_mel_queued's at_bar), -1 none */
+/* VST-66 a host playing back what the JAM page did. seq_set_step_fn: seq_t.step_fn. seq_take_block: block c, l on a JAM lane of the playing part
+ * (LANE_CHORDS, LANE_BASS, LANE_MEL_UP), now, through the same render and install a queued block's boundary runs, with the same chase: a call
+ * from step_fn sounds as that boundary does. No undo step; a block queued on the lane gives way; sounding notes ring on. A Melody lane not on JAM
+ * becomes one first (seq_mel_queue's), which pushes its undo step: a host that cares keeps the ring. seq_take_block_get: the playing block (1),
+ * as the JAM page reads it. seq_take_restore: part `part` back to `from`, the blocks queued for it dropped, no note touched */
+void seq_set_step_fn(seq_t *s, seq_step_fn fn, void *ctx);
+void seq_take_block(seq_t *s, int lane, int c, int l);
+int  seq_take_block_get(const seq_t *s, int lane, int *c, int *l);
+void seq_take_restore(seq_t *s, int part, const seq_part_t *from);
 /* 0.19 the STYLE browser's tile pictures: bar's roles as it would play under each of the n styles from `style` (role[j]: style + j,
  * 0..BASS_STYLE_COUNT-1) instead of the part's settings (a note-locked bar keeps its own): its rhythm as it plays, its NEW BAR
  * variation and fixed notes. Pure, no state change; a bad bar or style, or a lane that isn't DRAWN: all '.' */
@@ -1049,6 +1193,158 @@ void seq_rbrowse_open(seq_t *s, int lane);
 void seq_rbrowse_try(seq_t *s, int lane, int ri);
 int  seq_rbrowse_group(const seq_t *s, int lane);
 void seq_rbrowse_set_group(seq_t *s, int lane, int g);
+/* The Tweak page (iOS first; seq_cview and the bar editor's transaction stay as they were: no verb here leaves anything open), on the playing
+ * part's DRAWN Chords or Bass lane. A row (TW_*) has words; each word sets the engine's own knobs, so every format plays what the page says:
+ *   Busy COMPLEXITY 12 32 50 66 88; Off beat SYNC -2..3; Soft notes GHOSTS 0..4; Loose HUMANIZE 0..4; Lean PUSH 0 25 50 75 100; Follow LW_*;
+ *   Early AN_*; Lands CADENCE 0..3; Ending FILL and BREATH as one word: As is 0 0, Breath 0 2 (a beat), Pickup 1 0, Roll 3 0, Break 4 0; on the Bass
+ *   As is 0 0, Breath 0 2, Pickup 1 0, Step in 2 0, Run 3 0, Break 4 0. The Chords-only verbs below take no lane: hit_oct, can_point, chord, once, can_once, point_ok.
+ * seq_tweak_set: one undo step (the knobs, unlike their own setters, come back), none when it is so already; a bad row or word does nothing.
+ * seq_tweak_word: the word lit, -1 for a value none of them is (a Force song's Fill Busier, a knob between the words), which plays on
+ * until a word is tapped. seq_tweak_words: the row's words.
+ * The bar's verbs are one undo step each, as the bar editor's (seq_rbar_*), and the same rules: paint 1 when it changed the step (a HOLD needs a
+ * hit or hold before it); hit_oct on a hit; try is NEW BAR, 1 when it changed; reset is RESET BAR; keep is LOCK or UNLOCK; copy takes the bar to
+ * the bars of mask it may replace, what as seq_rcopy_set_what.
+ * seq_tweak_can_point: 1 when a chord picked at the step starts there as a change point, 0 when it is the slot's (the hit that starts a chord: the Feel page's).
+ * seq_tweak_chord: that chord (deg -1: the step's own point goes) as a change point in colour COL_*, 1 when it changed; the chord before it again
+ * removes the point; src at most THEORY_NBORROW, as change points. seq_tweak_once: seq_rbar_this_hit_only's answer.
+ * seq_bar_fill: bar `bar` as it plays with its ending, 1 when FILL changes it there (a phrase's last bar, not locked, FILL on), else
+ * seq_bar_plays' codes and 0. In a 1- or 2-bar loop the fill plays only every 4th song bar. seq_tweak_hash: moves when what the page shows does */
+enum { TW_BUSY, TW_OFFBEAT, TW_SOFT, TW_LOOSE, TW_LEAN, TW_FOLLOW, TW_EARLY, TW_LANDS, TW_ENDING, TW_COUNT };
+void seq_tweak_set(seq_t *s, int lane, int what, int word);
+int  seq_tweak_word(const seq_t *s, int lane, int what);
+int  seq_tweak_words(int lane, int what);
+int  seq_tweak_paint(seq_t *s, int lane, int bar, int step, int code);
+void seq_tweak_hit_oct(seq_t *s, int bar, int step, int o);
+int  seq_tweak_can_point(const seq_t *s, int bar, int step);
+int  seq_tweak_chord(seq_t *s, int bar, int step, int deg, int src, int colour);
+int  seq_tweak_once(seq_t *s, int bar, int step);
+int  seq_tweak_can_once(const seq_t *s, int bar, int step);   /* what seq_tweak_once would answer, changing nothing: 1, or RHO_* */
+int  seq_tweak_point_ok(int src, int colour);                 /* a change point can hold this chord */
+int  seq_tweak_try(seq_t *s, int lane, int bar);
+void seq_tweak_reset(seq_t *s, int lane, int bar);
+void seq_tweak_keep(seq_t *s, int lane, int bar);
+void seq_tweak_copy(seq_t *s, int lane, int bar, unsigned mask, int what);
+int  seq_bar_fill(const seq_t *s, int lane, int bar, unsigned char out[16]);
+void seq_set_part_bar(seq_t *s, int bar);        /* the song, just started, plays from this bar of the part: a start makes the host's bar the part's bar 1 */
+int  seq_phrase_end(const seq_t *s, int bar);   /* 1 on a phrase's last bar: bar 4, 8, 12, 16; a loop under 4 bars: its last */
+unsigned seq_tweak_hash(const seq_t *s, int lane);
+/* The Melody's Feel and Tweak pages (iOS first). Each verb is one undo step, none when it is so already; a bad value does nothing; a lane that isn't JAM is made JAM first, and that is
+ * the undo step. seq_mel_row sets a page's word (ML_*), and undo brings the setting back, as a knob's own setter wouldn't. ML_ANSWER on FORM LOOP also sets FORM 1+1; leaving ECHO also
+ * sets STRAY ALL (an answer changes the whole bar; less can sound the same as ECHO); SWAP equal to the call moves on to another block. ML_LANDS also marks the part cadc, even when the
+ * word is already lit: CADENCE then follows the chord (melody2.h).
+ * A chord (i: seq_feel_chords') has a pick: the note the tune lands on as it starts, read in seq_feel_chord_t.mtone, moct. seq_mel_tone_set tone 0: as the tune. A kept bar holds the
+ * picks it had. seq_mel_smooth: every chord on the nearest of its root, 3rd and 5th to the one before.
+ * seq_mel_note: the note the step plays, a tone of the chord or MP_* (melody2.h), tone 0 back to the tune. seq_mel_follow: the bar's absolute fixed notes (the Force's) go.
+ * seq_mel_copy: bar's line to the bars of mask not kept, each note as a tone of the chord under it, so it follows the new bar's chord.
+ * seq_mel_chord_notes: per chord MCN_SIZE bytes: what plays where it starts, what the tune plays with no pick, the tone and octave + 1 of the next chord nearest it, then
+ * mjam_land_notes' table from MCN_TABLE (MJ_LAND_AT - 1). seq_mel_as_tune: the bar's line with no step's pick or fixed note, its chords' picks in. seq_mel_pick: the step's pick, 0 none.
+ * seq_mel_fixed: its absolute fixed note, 0 none. seq_mel_off_key: the first step with a fixed note outside the key, sounding, else -1. seq_mel_gap_bar: 1 when Breath and Lead-in
+ * play on the bar. seq_mel_role: the bar's job (mjam_role). */
+enum { ML_FORM, ML_ANSWER, ML_STRAY, ML_AOCT, ML_VARIES, ML_HEIGHT, ML_WIDE, ML_BUSY, ML_SPEED, ML_SWING, ML_LENGTH, ML_LOOSE, ML_LEAN, ML_EARLY, ML_BREATH, ML_LEADIN, ML_LANDS, ML_COUNT };
+enum { MCN_NOW, MCN_TUNE, MCN_STEP_TONE, MCN_STEP_OCT, MCN_TABLE, MCN_SIZE = MCN_TABLE + MJ_LAND_NOTES - 1 };
+int  seq_mel_row_words(int what);
+int  seq_mel_row_get(const seq_t *s, int what);   /* the word lit, -1 for a value none of them is (a knob between the words) */
+void seq_mel_row(seq_t *s, int what, int word);
+void seq_mel_answer_block(seq_t *s, int c, int l);
+void seq_mel_tone_set(seq_t *s, int i, int tone, int oct);
+void seq_mel_tones_clear(seq_t *s);
+void seq_mel_smooth(seq_t *s);
+void seq_mel_note(seq_t *s, int bar, int step, int tone, int oct);
+void seq_mel_follow(seq_t *s, int bar);
+void seq_mel_copy(seq_t *s, int bar, unsigned mask);
+int  seq_mel_chord_notes(const seq_t *s, unsigned char *out, int max);
+void seq_mel_as_tune(const seq_t *s, int bar, unsigned char note[16]);
+int  seq_mel_pick(const seq_t *s, int bar, int step);
+int  seq_mel_fixed(const seq_t *s, int bar, int step);
+int  seq_mel_off_key(const seq_t *s, int bar);
+int  seq_mel_bar_locked(const seq_t *s, int bar);
+int  seq_mel_gap_bar(const seq_t *s, int bar);
+int  seq_mel_role(const seq_t *s, int bar);
+void seq_mel_notes(const seq_t *s, int bar, unsigned char note[16]);   /* the bar's notes as they play, 0 silent */
+int  seq_mel_rest_fixed(const seq_t *s, int bar, int step);            /* 1 on a painted rest or hold */
+void seq_mel_blocks(const seq_t *s, int *c, int *l, int *sc, int *sl);  /* the block it plays and the block SWAP answers with */
+/* The Bass's Tweak page, its Bars tab. seq_tweak_note: the note the hit at bar, step plays: a tone of the chord or BP_BELOW, BP_ABOVE (bassline.h), an octave
+ * -1..1 (tone 0: what the style plays; an absolute fixed note goes too), one undo step, none when it is so already or the step sounds nothing. It beats Lands,
+ * Try another and the style, as a fixed note does. seq_tweak_follow: the bar's absolute fixed notes (the Force's) go, one undo step.
+ * seq_bass_pick: the hit's pick as bass_state_t.fix holds it, 0 none (an absolute fixed note reads 0). seq_tweak_notes: the bar's notes as they play, with the
+ * ending. seq_tweak_as_style: what each hit would play with no pick or fixed note. seq_bass_off_key: the first step with an absolute fixed note, sounding,
+ * outside the key, else -1 */
+void seq_tweak_note(seq_t *s, int bar, int step, int tone, int oct);
+void seq_tweak_follow(seq_t *s, int bar);
+int  seq_bass_pick(const seq_t *s, int bar, int step);
+void seq_tweak_notes(const seq_t *s, int bar, unsigned char note[16]);
+void seq_tweak_as_style(const seq_t *s, int bar, unsigned char note[16]);
+int  seq_bass_off_key(const seq_t *s, int bar);
+/* The Bass's Feel page (iOS first). A chord (i: seq_feel_chords') has a tone: the note under it, heard on its first hit and aimed at by the line (any TONE_*; the page offers
+ * root, 5th, 3rd, 7th; read in seq_feel_chord_t.tone, 0 the root). Each verb is one undo step, none when it is so already; a bad value does nothing; a kept bar holds the tones
+ * it had when it was kept (bass_state_t.ftone). seq_bass_tone_set: a chord's tone (a change point's chord has none: nothing). seq_bass_tones_clear: every chord on its root.
+ * seq_bass_feel_style: style i, every chord on its root. seq_bass_row: a word of a Line row (BL_*: Moves, Octaves, Steps in as BK_*; Lowest note REGISTER -2..2; Height OCTAVE
+ * -1..1; Stays on PEDAL), with undo where the knobs have none. seq_bass_chord_notes: for each chord, in one read, BCN_SIZE bytes of out (max chords, count returned): [tone] the
+ * MIDI note each TONE_* plays as a root, [BCN_NOW] the one the chord's note plays now (a pedal wins), [BCN_STEP] the one of the next chord's root, 3rd and 5th nearest that note
+ * (ties to the root) */
+enum { BL_MOVES, BL_OCTAVES, BL_STEPS, BL_LOWEST, BL_HEIGHT, BL_STAYS, BL_COUNT };
+enum { BCN_NOW = 0, BCN_STEP = 8, BCN_SIZE = 9 };
+void seq_bass_row(seq_t *s, int what, int word);
+int  seq_bass_row_get(const seq_t *s, int what);
+int  seq_bass_row_words(int what);
+void seq_bass_tone_set(seq_t *s, int i, int tone);
+void seq_bass_tones_clear(seq_t *s);
+void seq_bass_feel_style(seq_t *s, int i);
+int  seq_bass_chord_notes(const seq_t *s, unsigned char *out, int max);
+/* Try and keep (iOS): called by the iOS host only. seq_chord_steps: the chord each step of part p plays as the Bass and the Melody hear it, its
+ * root's pitch class + 1 | its triad quality (theory_triad_quality) << 4; 0 past p->bars. seq_chords_changed: bit b set when any step of bar b
+ * (below `bars`) differs between a and b. seq_follow_part ("chords lead", pure, no undo): in the bars of mask the Bass's and the Melody's
+ * absolute fixed notes (fix 1..127) go (picks, a rest, a hold stay) and the bars are no longer kept on either lane (nlock, the Melody's fland),
+ * so they take the new chords; 1 when it changed anything. seq_follow_chords: the same on the playing part; call it straight after the chord
+ * verb (it relies on the verb's closed transaction): a plain Bass and a plain Melody snapshot, joined to the verb's undo step (join 1: one Undo
+ * undoes both) or, join 0 (the verb pushed none: a browsed preset), an undo step of their own; knob turns are never undone; then the lanes
+ * re-render; nothing (no snapshot) when nothing changes. seq_chords_diff: seq_chords_changed of parts a's and b's seq_chord_steps (s's key).
+ * seq_part_at: part `part` of s in place (0..SEQ_PARTS - 1; else NULL) */
+void     seq_chord_steps(const seq_t *s, const seq_part_t *p, unsigned short out[SEQ_LANE_STEPS]);
+unsigned seq_chords_changed(const unsigned short *a, const unsigned short *b, int bars);
+unsigned seq_chords_diff(const seq_t *s, const seq_part_t *a, const seq_part_t *b, int bars);
+const seq_part_t *seq_part_at(const seq_t *s, int part);
+int      seq_follow_part(seq_part_t *p, unsigned mask);
+void     seq_follow_chords(seq_t *s, unsigned mask, int join);
+/* Try and keep's lane view (iOS, main thread only). seq_scratch_from: scratch becomes a copy of `from` that can never send MIDI or call the host (emit a
+ * no-op, ctx NULL, no step hook); the caller owns it (a seq_t is large: never on the stack) and reuses it. seq_lane_view: scratch's playing part
+ * becomes chords_from (its chords and everything else) with lane `lane`'s own fields (LANE_CHORDS, LANE_BASS or LANE_MEL_UP; else nothing) from
+ * lane_from: the Chords' lane, drawn bars, RHYTHM knobs, LOCK WITH, ANTICIPATE, JAM block, SHAPE row and hit octaves (not the harmony or the
+ * voicing); the Bass's the same and its notes (bass_state_t) and tones (fs.tone); the Melody's lane, SHAPE row, notes (mjam_state_t), mel.kn and
+ * picks (fs.mtone, moct). A lane's mute stays the chords_from's. The tones and picks are carried by time step: each chord takes the one lane_from
+ * plays where it starts, so an edit stays on the chord at its time when the chords moved. Then that lane is rendered (pure renders only), the
+ * loop alone (bars from chords_from; the lane silent past them). Read it with the getters (seq_tweak_notes, seq_mel_line, seq_feel_chords,
+ * seq_bar_codes, seq_tweak_hash). lane_from and chords_from are parts outside scratch (copies the caller holds, another seq_t's) */
+void     seq_scratch_from(seq_t *scratch, const seq_t *from);
+void     seq_lane_view(seq_t *scratch, int lane, const seq_part_t *lane_from, const seq_part_t *chords_from);
+/* Try and keep's Go back (iOS host, a setter): lane `lane` (LANE_CHORDS, LANE_BASS or LANE_MEL_UP; else, or start NULL, nothing) of the playing part
+ * back to `start` (a copy of the part the app held), one undo step that brings the settings back too (its Undo puts back what Go back replaced).
+ * A queued JAM block on the lane is cancelled. The lane's mute is left alone. Bass and Melody: the lane's own fields as seq_lane_view takes them
+ * (its JAM block, LOCK WITH with the other lane OWN when it follows, per-chord tones and picks by time step) over today's chords, then the
+ * cascade on that lane alone (its absolute fixed notes go and its bars are kept no more, as seq_follow_part) in the bars whose chord differs
+ * between start and now. Chords: those fields and the harmony (chords, change points, Feel's slots, recipe, chord length, voicing and its style,
+ * phrase, colour ranking, locks) and the loop's length (as seq_set_bars; its Undo puts it back too); the Bass's tones and the Melody's picks are
+ * now's, carried per chord by time step. Only in the bars whose chord differs between start and now (where the cascade acted) does the start's
+ * come back where now has none: its tones and picks, absolute fixed notes and kept bars; any other bar keeps now's, even an edit removed since.
+ * all_picks (Chords only; the app's: a progression preset ran since the start, which drops every tone and pick): the start's tones and picks
+ * come back where now has none on every chord, its fixed notes and kept bars still only in those bars. Then the lanes render */
+void     seq_lane_back(seq_t *s, int lane, const seq_part_t *start, int all_picks);
+/* Try and keep's Start over (iOS host, a setter): lane `lane` of the playing part back to its JAM block, one undo step whose Undo puts every
+ * setting back (on Chords the loop's length too). A queued JAM block on the lane is cancelled; the lane's mute and the JAM knobs stay. Nothing
+ * for another lane, a Chords or Bass lane that isn't drawn, or (Chords) a preset outside THEORY_PRESETS.
+ * Chords: progression preset `preset` at a chord a bar, no change point, borrow, colour, lock or Feel edit (as seq_feel_preset), the loop its
+ * length (1, 2, 4 or 8 bars: it may shrink); every bar the block's rhythm and the block's voicing (kept and painted bars too; no block:
+ * Pulse and VOICING_DEFAULT), hit octaves, NEW BAR versions, RHYTHM knobs, COMPLEXITY, PUSH, GATE, DYNAMICS, ANTICIPATE neutral, LOCK WITH OWN.
+ * The preset drops the Bass's tones and the Melody's picks; in the bars whose chord changed the Bass and the Melody follow (seq_follow_part).
+ * Bass: the block's rhythm and notes on every bar (no block: Root and Pop Root), nothing kept or fixed, no tone, RHYTHM knobs, NEW BAR versions,
+ * COMPLEXITY, PUSH, ANTICIPATE neutral, LOCK WITH OWN. Melody (made JAM first when it isn't): its block and SWITCH AT stay; the rest of its
+ * settings mjam_default's, nothing kept or fixed, no pick, PUSH, DYNAMICS, SWING, ACCENT, Early and Loose as new, Length 50, NEW BAR versions
+ * neutral, COMPLEXITY the block's. `preset` is read on Chords only */
+void     seq_lane_start_over(seq_t *s, int lane, int preset);
+/* The Melody with answer `ans` (MA_*; else, or a lane not JAM, nothing) on scratch's playing part (a seq_scratch_from copy, maybe a view):
+ * as seq_mel_row's ML_ANSWER sets it (FORM LOOP becomes 1+1, SWAP equal to the call another block) but STRAY as it is, then rendered with
+ * the pure renders, no undo. Read it with seq_mel_line (the "sounds the same as Repeats" check) */
+void     seq_mel_view_answer(seq_t *scratch, int ans);
 /* 0.17 voicing styles (voicing.h): applying style i (0..VOICING_NSTYLES - 1; else ignored) sets the playing part's connection mode,
  * COLOUR, INVERSION, SPREAD, STRUM (and its direction) and the Chords lane OCTAVE, and vstyle; one undo step, none when it changes
  * nothing. seq_voicing_style: the part's style (-1 Custom). seq_voicing_edited: 1 when any of those eight differ from the style's

@@ -83,18 +83,20 @@ int bass_set_edited(const bass_set_t *s) {
 }
 
 
-static int in_scale(const bass_key_t *k, int pc) {
+int bass_in_scale(const bass_key_t *k, int pc) {
     for (int i = 0; i < 7; i++) if (k->scale[i] == pc) return 1;
     return 0;
 }
 
+int bass_pedal_pc(const bass_set_t *s, const bass_key_t *k) { return s->pedal == 1 ? k->tonic : s->pedal == 2 ? k->scale[4] : -1; }
+
 int bass_scale_below(const bass_key_t *k, int pc) {
-    for (int d = 1; d < 12; d++) if (in_scale(k, pmod(pc - d, 12))) return pmod(pc - d, 12);
+    for (int d = 1; d < 12; d++) if (bass_in_scale(k, pmod(pc - d, 12))) return pmod(pc - d, 12);
     return pmod(pc - 1, 12);
 }
 
 int bass_scale_above(const bass_key_t *k, int pc) {
-    for (int d = 1; d < 12; d++) if (in_scale(k, (pc + d) % 12)) return (pc + d) % 12;
+    for (int d = 1; d < 12; d++) if (bass_in_scale(k, (pc + d) % 12)) return (pc + d) % 12;
     return (pc + 1) % 12;
 }
 
@@ -122,9 +124,9 @@ static unsigned char midi_of(const bass_set_t *s, int pc, int up) {
  * span * 8 / 16, compared in integers) */
 static void approach(const bass_span_in_t *in, const int *hits, int nh, unsigned char note[], char role[]) {
     const bass_chord_t *ch = in->chord, *nx = in->next;
-    int app = in->set.k[BK_APP], L = hits[nh - 1], L2 = hits[nh - 2], t = nx->root;
-    if (!app || in->set.pedal || nh < 2 || nx->root == ch->root || 16 * L < 10 * in->span) return;
-    if (app == 1) { note[L] = midi_of(&in->set, t > ch->root ? bass_scale_below(in->key, t) : bass_scale_above(in->key, t), 0); role[L] = 'p'; }
+    int app = in->set.k[BK_APP], L = hits[nh - 1], L2 = hits[nh - 2], t = bass_home(nx), from = bass_home(ch);
+    if (!app || in->set.pedal || nh < 2 || t == from || 16 * L < 10 * in->span) return;
+    if (app == 1) { note[L] = midi_of(&in->set, t > from ? bass_scale_below(in->key, t) : bass_scale_above(in->key, t), 0); role[L] = 'p'; }
     if (app == 2 || app == 4) { note[L] = midi_of(&in->set, (t + 11) % 12, 0); role[L] = 'c'; }
     if (app == 3) { note[L] = midi_of(&in->set, (t + 1) % 12, 0); role[L] = 'c'; }
     if (app == 4 && 16 * L2 >= 8 * in->span) { note[L2] = midi_of(&in->set, (t + 1) % 12, 0); role[L2] = 'c'; }
@@ -134,7 +136,7 @@ void bass_span(const bass_span_in_t *in, unsigned char note[], char role[]) {
     const bass_set_t *s = &in->set;
     const bass_chord_t *ch = in->chord;
     int hits[16], nh = 0;
-    int ped = s->pedal == 1 ? in->key->tonic : s->pedal == 2 ? in->key->scale[4] : -1;
+    int ped = bass_pedal_pc(s, in->key);
     for (int i = 0; i < in->span; i++) {
         note[i] = 0;
         role[i] = in->codes[i] == RC_HOLD ? '-' : '.';
@@ -146,8 +148,8 @@ void bass_span(const bass_span_in_t *in, unsigned char note[], char role[]) {
         if (ped >= 0) { r = 'P'; pc = ped; }
         else if (r == '5') pc = (ch->root + 7) % 12;
         else if (r == '3') pc = ch->third;
-        else if (r == 'p') pc = bass_scale_below(in->key, in->next->root);
-        else pc = ch->root;
+        else if (r == 'p') pc = bass_scale_below(in->key, bass_home(in->next));
+        else pc = bass_home(ch);
         note[hits[h]] = midi_of(s, pc, up && r != 'p');
         role[hits[h]] = r == 'R' ? (up ? 'o' : '1') : r == 'P' ? (up ? 'o' : 'P') : r;
     }
@@ -172,7 +174,7 @@ int bass_tension(int pc, const bass_chord_t *c, const bass_key_t *k) {
     int iv = pmod(pc - c->root, 12), third = c->minor ? 3 : 4;
     if (iv == 0 || iv == 7) return 0;
     if (iv == third) return 8;
-    if (!in_scale(k, pc)) return iv == 1 || iv == 6 ? 85 : 60;
+    if (!bass_in_scale(k, pc)) return iv == 1 || iv == 6 ? 85 : 60;
     switch (iv) {
     case 2: return 30;
     case 5: return c->minor ? 28 : 42;

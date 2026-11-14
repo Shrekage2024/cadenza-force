@@ -295,7 +295,7 @@ static void settle_slots(seq_part_t *p) {
     p->prog_len = n;
     if (p->filled_slots < n) p->filled_slots = n;
     f = p->filled_slots;
-    for (int i = f; i < SEQ_MAX_PROG; i++) p->prog[i] = 0, p->src[i] = p->colour[i] = 0;
+    for (int i = f; i < SEQ_MAX_PROG; i++) p->prog[i] = 0, p->src[i] = p->colour[i] = 0, memset(&p->fs[i], 0, sizeof p->fs[i]);
     if (f < SEQ_MAX_PROG) p->slot_lock &= SLOT_BIT(f) - 1;
     if (h < 1 || h > SEQ_LEGACY_PROG || (h <= n ? !part_repeats(p, h, n) : h > f)) h = min_period(p, n);
     p->phrase = h;
@@ -307,6 +307,7 @@ static void copy_slot(seq_part_t *p, int i, int from) {
     p->prog[i] = p->prog[from];
     p->src[i] = p->src[from];
     p->colour[i] = p->colour[from];
+    p->fs[i] = p->fs[from];
     p->slot_lock = (p->slot_lock & ~SLOT_BIT(i)) | (uint64_t)slot_locked(p, from) << i;
 }
 
@@ -348,18 +349,20 @@ static void fill_phrase(seq_part_t *p, int n, const int *deg, const unsigned cha
 static void remap_slots(seq_part_t *p, int old_cl) {
     int prog[SEQ_MAX_PROG];   /* a setter's own (several instances set at once on iOS, VST-33): 384 bytes of stack */
     unsigned char src[SEQ_MAX_PROG], col[SEQ_MAX_PROG];
+    seq_feel_slot_t fs[SEQ_MAX_PROG];
     uint64_t lock = 0;
     int cl = p->chord_len, n = slots_of(p->bars, old_cl), filled = p->filled_slots, q = grow_period(p, n), h = p->phrase, r = p->rank_len;
     int f = (filled * old_cl + cl - 1) / cl;
     f = f < part_slots(p) ? part_slots(p) : f > SEQ_MAX_PROG ? SEQ_MAX_PROG : f;
     for (int i = 0; i < SEQ_MAX_PROG; i++) {
         int t = i * cl / old_cl, j = t < filled ? t : t % q;
-        prog[i] = p->prog[j], src[i] = p->src[j], col[i] = p->colour[j];
+        prog[i] = p->prog[j], src[i] = p->src[j], col[i] = p->colour[j], fs[i] = p->fs[j];
         if (i < f) lock |= (uint64_t)slot_locked(p, j) << i;
     }
     memcpy(p->prog, prog, sizeof prog);
     memcpy(p->src, src, sizeof src);
     memcpy(p->colour, col, sizeof col);
+    memcpy(p->fs, fs, sizeof fs);
     p->slot_lock = lock;
     p->filled_slots = f;
     p->phrase = h * old_cl % cl ? 0 : h * old_cl / cl;   /* the phrase at the new length, if whole (settle_slots checks it) */
@@ -523,6 +526,60 @@ static void voice_chain(const seq_t *s, seq_part_t *p, int n) {
         p->voice_n[i] = theory_voice_mode(notes, slot_notes(s, p, i, notes), p->voice[i - 1], p->voice_n[i - 1], mode, p->voice[i]);
 }
 
+/* 0.28 a slot's feel code (seq_feel_slot_t): what it plays, a borrow's degree left out (a scale change moves it, the chord stays) */
+static unsigned feel_code_of(int deg, int src, int colour) { return 1u + (unsigned)((src ? 0 : deg) + 7 * (src + (THEORY_SRC_MAX + 1) * colour)); }
+static unsigned feel_code(const seq_part_t *p, int i) { return feel_code_of(p->prog[i], p->src[i], p->colour[i]); }
+
+/* 0.28 slot i's recipe notes, ascending: each voice's role in this chord, at the note nearest its reference (a note already taken: an
+ * octave up); returns the count */
+static int recipe_notes(const seq_t *s, const seq_part_t *p, int i, int out[THEORY_CHORD_MAX]) {
+    int sc = slot_scale(s, p, i), col = eff_colour(s, p, i), n = p->rc.n;
+    for (int k = 0; k < n; k++) {
+        int pc = theory_tone_note(s->key, sc, p->prog[i], theory_colour_tone(col, p->rc.role[k]), 0) % 12, m = p->rc.note[k];
+        m += (int)floor_mod(pc - m + 6, 12) - 6;   /* the nearest, -6..5 from the reference */
+        for (int j = 0; j < k; j++)
+            if (out[j] == m) m += 12, j = -1;
+        out[k] = m;
+    }
+    sort_ints(out, n);
+    return n;
+}
+
+/* 0.28 the final notes over the voicing: each slot's hand notes, else the recipe. A slot's voice never changes another's. Bases and hand
+ * notes of a slot that no longer plays what they were set on go */
+static void feel_voices(const seq_t *s, seq_part_t *p) {
+    for (int i = 0; i < SEQ_MAX_PROG; i++) {
+        seq_feel_slot_t *f = &p->fs[i];
+        if ((f->base || f->hand_n) && f->pick != feel_code(p, i)) f->base = 0, f->hand_n = 0;
+        if (i >= p->prog_len) continue;
+        if (f->hand_n) {
+            p->voice_n[i] = f->hand_n;
+            for (int k = 0; k < f->hand_n; k++) p->voice[i][k] = f->hand[k];
+        } else if (p->rc.n) {
+            p->voice_n[i] = recipe_notes(s, p, i, p->voice[i]);
+        }
+    }
+}
+
+/* 1 when slot i plays final notes (spread_notes adds only the step's octave) */
+static int feel_final(const seq_part_t *p, int i) { return i < SEQ_MAX_PROG && (p->rc.n || p->fs[i].hand_n); }
+
+/* 0.28 notes placed by hand on the part */
+static int feel_has_hands(const seq_part_t *p) {
+    if (p->rc.n) return 1;
+    for (int i = 0; i < p->prog_len; i++)
+        if (p->fs[i].hand_n) return 1;
+    return 0;
+}
+
+/* 0.28 every hand note and the recipe gone; 1 if there were any (the caller revoices) */
+static int feel_hands_clear(seq_part_t *p) {
+    int had = p->rc.n != 0;
+    p->rc.n = 0;
+    for (int i = 0; i < SEQ_MAX_PROG; i++) had |= p->fs[i].hand_n != 0, p->fs[i].hand_n = 0;
+    return had;
+}
+
 /* The Chords lane's notes for every progression slot; run by the setters and the loads, never in seq_block. Close: the
  * chords as theory_chord_notes gives them. The other modes (0.17: Smooth, Top line, Rootless): a first pass from the
  * root-position chord, then slot 0 is led from the last slot (the loop wraps to it) and the chain re-run from there; one
@@ -605,6 +662,7 @@ static void revoice(const seq_t *s, seq_part_t *p) {
     settle_slots(p);
     cp_sync(p);
     voice_slots(s, p);
+    feel_voices(s, p);   /* 0.28 */
     name_slots(s, p);
     voice_points(s, p);
 }
@@ -848,11 +906,31 @@ static bass_key_t bass_key(const seq_t *s) {
     return k;
 }
 
+/* A chord's tone on the Feel page: slot's (a change point's chord has none), and its pitch class, a degree of the slot's scale as CADENCE reads them
+ * (a diminished 5th as it is) */
+static int slot_tone(const seq_part_t *p, int slot) { return slot < SEQ_MAX_PROG ? p->fs[slot].tone : 0; }
+static int tone_pc(const seq_t *s, const seq_part_t *p, int slot, int tone) {
+    return theory_degree_pc(s->key, slot_scale(s, p, slot), p->prog[slot] + tone - 1);
+}
+
 /* 0.19 the chord the Bass reads at loop step i (wrapping): its slot's triad root and 3rd, in the slot's scale (a borrow's own) */
-static bass_chord_t bass_chord_at(const seq_t *s, const seq_part_t *p, int i) {
+static bass_chord_t chord_toned(const seq_t *s, const seq_part_t *p, int i, int tone) {
     int slot = slot_at(p, 0, i % (p->bars * SEQ_STEPS)), sc = slot_scale(s, p, slot);
     int r = theory_degree_pc(s->key, sc, p->prog[slot]), t = theory_degree_pc(s->key, sc, p->prog[slot] + 2);
-    return (bass_chord_t){r, t, floor_mod(t - r, 12) == 3};
+    return (bass_chord_t){r, t, floor_mod(t - r, 12) == 3, tone ? floor_mod(tone_pc(s, p, slot, tone) - r, 12) : 0};
+}
+
+/* The tone at loop step i (wrapping): a note-locked bar's own, as it was kept, else its chord's */
+static int step_tone(const seq_part_t *p, int i) {
+    int t = i % (p->bars * SEQ_STEPS), b = t / SEQ_STEPS;
+    return p->bass.nlock >> b & 1 ? p->bass.ftone[b][t % SEQ_STEPS] : slot_tone(p, slot_at(p, 0, t));
+}
+
+static bass_chord_t bass_chord_at(const seq_t *s, const seq_part_t *p, int i) { return chord_toned(s, p, i, step_tone(p, i)); }
+
+/* A bar's chord tones as they are now, into its own copy: Keep */
+static void bass_freeze_tones(seq_part_t *p, int b) {
+    for (int a = 0; a <= SEQ_STEPS; a++) p->bass.ftone[b][a] = (unsigned char)slot_tone(p, slot_at(p, b, a));
 }
 
 /* 0.19 what a DRAWN Bass bar's notes read besides its codes and settings: the key; the spans, the steps of one chord in the bar (the
@@ -864,16 +942,33 @@ typedef struct {
     int n;
     unsigned char at[SEQ_STEPS + 1];
     bass_chord_t ch[SEQ_STEPS + 1];
+    int picks;                  /* the bar has hits with a picked note */
+    signed char pick[SEQ_STEPS];   /* each one's pitch class, where the bar's fixed notes hold a pick */
 } bar_harm_t;
 
 static void bar_harm(const seq_t *s, const seq_part_t *p, int b, const bass_key_t *k, bar_harm_t *h) {
     int span = p->chord_len < SEQ_STEPS ? p->chord_len : SEQ_STEPS;
     h->key = k;
     h->n = 0;
-    for (int a = 0; a < SEQ_STEPS; a++)
-        if (a % span == 0 || slot_at(p, b, a) != slot_at(p, b, a - 1)) h->at[h->n] = (unsigned char)a, h->ch[h->n++] = bass_chord_at(s, p, b * SEQ_STEPS + a);
+    for (int a = 0; a < SEQ_STEPS; a++) {
+        int x = slot_at(p, b, a), y = a ? slot_at(p, b, a - 1) : x;
+        /* 0.28 a Feel write's uneven chords are repeated slots, and one of them must not move the Bass: a new span only where the chord changes */
+        int same = p->feel_spans && p->prog[x] == p->prog[y] && p->src[x] == p->src[y] && p->colour[x] == p->colour[y] && step_tone(p, b * SEQ_STEPS + a) == step_tone(p, b * SEQ_STEPS + (a ? a - 1 : 0));
+        if (!a || ((a % span == 0 || x != y) && !same))
+            h->at[h->n] = (unsigned char)a, h->ch[h->n++] = bass_chord_at(s, p, b * SEQ_STEPS + a);
+    }
     h->at[h->n] = SEQ_STEPS;
-    h->ch[h->n] = bass_chord_at(s, p, b * SEQ_STEPS + SEQ_STEPS);
+    /* a kept bar's own copy of the next chord's tone: what it walks into stays as it was kept */
+    h->ch[h->n] = p->bass.nlock >> b & 1 ? chord_toned(s, p, b * SEQ_STEPS + SEQ_STEPS, p->bass.ftone[b][SEQ_STEPS]) : bass_chord_at(s, p, b * SEQ_STEPS + SEQ_STEPS);
+    h->picks = 0;
+    for (int j = 0; j < h->n; j++)
+        for (int a = h->at[j]; a < h->at[j + 1]; a++) {
+            int code = p->bass.fix[b * SEQ_STEPS + a], t;
+            if (!bass_is_pick(code)) continue;
+            t = bass_pick_tone(code);
+            h->pick[a] = (signed char)(t == BP_BELOW ? (bass_home(&h->ch[j + 1]) + 11) % 12 : t == BP_ABOVE ? (bass_home(&h->ch[j + 1]) + 1) % 12 : tone_pc(s, p, slot_at(p, b, a), t));
+            h->picks = 1;
+        }
 }
 
 /* 0.18: a RHYTHM knob's value v in its range (SYNC -2..3, GHOSTS, HUMANIZE and FILL 0..4; 0.24 CADENCE and BREATH 0..3) */
@@ -954,6 +1049,7 @@ static const unsigned char BREATH_STEPS[4] = {0, 2, 4, 8};
  *   2. JAM's transforms (0.22's order: TIME, then VARIATION's rhythm)                       render_bar_at > jam_codes_at
  *   3. COMPLEXITY  4. SYNC  5. GHOSTS                                                      render_bar_at
  *   6. BREATH: the phrase's last bar's last 0 / 2 / 4 / 8 steps rest                        render_bar_at
+ *   6b. 0.28.1 a hold at a chord change strikes that chord (Feel's chords only)             feel_strike, after render_bar
  *   7. CADENCE: the bar's last hit after BREATH (cad_step) on the chord's 5th / 3rd / root: the Bass's note (bass_cadence, in stage 10's
  *      render: the hit is picked from what 1-6 made, before FILL and ANTICIPATE), the Chords' voicing (chord_cadence, a play-time offset as
  *      INVERSION's, in part_step_notes). When ANTICIPATE (9) moves that hit, its early hit keeps the cadence (ruling 17: the Chords'
@@ -995,17 +1091,29 @@ static const bass_set_t *bar_set(const seq_part_t *p, int b, const bass_set_t *s
     return p->bass.nlock >> b & 1 ? &p->bass.frozen[b] : set ? set : &p->bass.set;
 }
 
+/* A pick's note: its pitch class, in settings set */
+static int pick_midi(const bass_set_t *set, int pc, int code) { return clampi(bass_root_note(set, pc) + 12 * bass_pick_oct(code), 1, 127); }
+
 /* 0.19 the notes and roles of DRAWN Bass bar b, whose codes as they play are c: the note model (bass_span) per span of h, with the
  * bar's settings (bar_set), its NEW BAR variation (0.22 + its JAM VARIATION position pos, jam_var_pos) and its fixed notes */
-static void bass_bar_notes_at(const seq_part_t *p, int b, const bass_set_t *set, const bar_harm_t *h, const unsigned char c[16], int pos,
-                              unsigned char note[16], char role[16]) {
+static void bass_bar_spans(const seq_part_t *p, int b, const bass_set_t *set, const bar_harm_t *h, const unsigned char c[16], int pos, int fixes,
+                           unsigned char note[16], char role[16]) {
     int v = p->lane[LANE_BASS].bar_var[b] + pos;
     set = bar_set(p, b, set);
     for (int j = 0; j < h->n; j++) {
         int a = h->at[j], i = b * SEQ_STEPS + a;
-        bass_span_in_t in = {c + a, h->at[j + 1] - a, &h->ch[j], &h->ch[j + 1], h->key, *set, v, &p->bass.fix[i]};
+        unsigned char own[SEQ_STEPS];
+        bass_span_in_t in = {c + a, h->at[j + 1] - a, &h->ch[j], &h->ch[j + 1], h->key, *set, v, fixes ? &p->bass.fix[i] : NULL};
+        if (fixes && h->picks) {   /* a pick's pitch: the chord's note here, in these settings */
+            for (int q = 0; q < in.span; q++) own[q] = bass_is_pick(p->bass.fix[i + q]) ? (unsigned char)pick_midi(set, h->pick[a + q], p->bass.fix[i + q]) : p->bass.fix[i + q];
+            in.fix = own;
+        }
         bass_span(&in, note + a, role + a);
     }
+}
+static void bass_bar_notes_at(const seq_part_t *p, int b, const bass_set_t *set, const bar_harm_t *h, const unsigned char c[16], int pos,
+                              unsigned char note[16], char role[16]) {
+    bass_bar_spans(p, b, set, h, c, pos, 1, note, role);
 }
 static void bass_bar_notes(const seq_part_t *p, int b, const bass_set_t *set, const bar_harm_t *h, const unsigned char c[16],
                            unsigned char note[16], char role[16]) {
@@ -1077,7 +1185,10 @@ static void bass_notes(const seq_t *s, seq_part_t *p, int b, const unsigned char
     if (f != 4 || !memcmp(c, fill, 16)) {   /* NONE, a locked bar or a BREAK that drops nothing: the same notes */
         memcpy(fnote, note, 16);
         if (f > 0 && f < 4 && !p->rb[DL_BASS][b].lock)
-            bass_fill_notes(f, bass_root_note(bar_set(p, nb, NULL), bass_chord_at(s, p, nb * SEQ_STEPS).root), fnote);
+            {
+            bass_chord_t to = bass_chord_at(s, p, nb * SEQ_STEPS);
+            bass_fill_notes(f, bass_root_note(bar_set(p, nb, NULL), bass_home(&to)), fnote);
+        }
         return;
     }
     bass_bar_notes(p, b, NULL, &h, fill, fnote, role);
@@ -1088,8 +1199,35 @@ static int chord_change_at(const seq_t *s, const seq_part_t *p, int bar, int ste
 static void djq_own(seq_t *s, seq_part_t *p, int d);
 static void djq_follow(seq_t *s, seq_part_t *p, int d);
 
+/* The note the fixed note on part step j plays. A half-step pick reads the bar's spans for the chord after it */
+static int fixed_note(const seq_t *s, const seq_part_t *p, int j) {
+    int code = p->bass.fix[j], b = j / SEQ_STEPS, t = bass_pick_tone(code);
+    if (!bass_is_pick(code)) return code;
+    if (t <= TONE_7) return pick_midi(bar_set(p, b, NULL), tone_pc(s, p, slot_at(p, 0, j), t), code);
+    bass_key_t k = bass_key(s);
+    bar_harm_t h;
+    bar_harm(s, p, b, &k, &h);
+    return pick_midi(bar_set(p, b, NULL), h.pick[j % SEQ_STEPS], code);
+}
+
 /* 0.24 ANTICIPATE's steps (AN_*) */
 static const signed char AN_STEPS[4] = {0, 1, 2, 4};
+
+/* 0.28.1 stage 6b (THE ORDER IN A BAR): on a part with Feel's chords under a bar, a Chords hold at a chord change strikes that chord, as the hit holding
+ * it (its velocity; bar_steps gives it that hit's octave), so a chord added on Feel is heard over a held rhythm. Older parts hold through, as
+ * they always did. f: the bar's flags, NULL for a fill variant or a scratch render */
+static void feel_strike(const seq_t *s, const seq_part_t *p, int lane, int b, unsigned char c[16], unsigned char *f) {
+    int held = RC_REST;
+    if (lane != LANE_CHORDS || !p->feel_spans) return;
+    for (int j = 0; j < SEQ_STEPS; j++) {
+        if (rhythm_is_hit(c[j])) held = c[j];
+        else if (c[j] != RC_HOLD) held = RC_REST;
+        else if (held != RC_REST && chord_change_at(s, p, b, j)) {
+            c[j] = (unsigned char)held;
+            if (f) f[j] |= SF_ADDED | SF_STRUCK;
+        }
+    }
+}
 
 /* 0.24 drawn lane d's bar b flags before ANTICIPATE: SF_ADDED on each hit of its codes as they play (c) that its drawn codes lack */
 static void bar_flags(seq_part_t *p, int d, int b, const unsigned char c[16]) {
@@ -1110,10 +1248,11 @@ static void bar_steps(const seq_t *s, seq_part_t *p, int lane, int b, const unsi
     rhythm_to_steps(c, st);
     if (lane == LANE_CHORDS) {
         unsigned char dr[16];
+        int held = 0;   /* the octave of the hit a struck one comes from */
         drawn_codes(p, d, b, dr);
         for (int i = 0; i < SEQ_STEPS; i++) {
             if (!rhythm_is_hit(dr[i])) p->hoct[b][i] = 0;
-            if (st[i].on) st[i].oct = p->hoct[b][i];
+            if (st[i].on) held = st[i].oct = p->sflag[d][b * SEQ_STEPS + i] & SF_STRUCK ? (signed char)held : p->hoct[b][i];
         }
     }
     if (DLANE[d].notes) DLANE[d].notes(s, p, b, c, k);
@@ -1125,6 +1264,8 @@ static void render_one_k(const seq_t *s, seq_part_t *p, int lane, int b, const b
     unsigned char c[16];
     render_bar(p, lane, b, c, p->rfill[dl_of(lane)][b]);
     bar_flags(p, dl_of(lane), b, c);
+    feel_strike(s, p, lane, b, c, &p->sflag[dl_of(lane)][b * SEQ_STEPS]);
+    feel_strike(s, p, lane, b, p->rfill[dl_of(lane)][b], NULL);
     if (lane_drawn(p, lane)) bar_steps(s, p, lane, b, c, k);
 }
 
@@ -1176,7 +1317,13 @@ static void anticipate_notes(const seq_t *s, seq_part_t *p, int lane, unsigned c
         else {
             /* 0.24 fix round 1 (ruling 17): j's fixed note, else the cadence note when j was its bar's cadence hit, else the new root */
             int near = x->abs ? x->abs : 36, cad = p->bass.fix[j] ? 0 : cad_at(p, DL_BASS, j);
-            int note = p->bass.fix[j] ? p->bass.fix[j] : nearest_pc(cad ? cad_pc(s, p, j, cad) : bass_chord_at(s, p, j).root, near);
+            int note;
+            if (p->bass.fix[j]) note = fixed_note(s, p, j);
+            else if (cad) note = nearest_pc(cad_pc(s, p, j, cad), near);
+            else {
+                bass_chord_t to = bass_chord_at(s, p, j);
+                note = nearest_pc(bass_home(&to), near);
+            }
             set_abs(x, clampi(note, 1, 127));
             p->brole[e] = p->bass.fix[j] ? 'f' : cad ? CAD_ROLE[cad] : '1';
             if (rhythm_is_hit(p->rfill[d][eb][e % SEQ_STEPS])) p->rfill_abs[d][eb][e % SEQ_STEPS] = x->abs;
@@ -1207,6 +1354,8 @@ static void lane_bars(const seq_t *s, seq_part_t *p, int lane, unsigned mask, co
     for (int b = 0; b < p->filled; b++) {
         render_bar(p, lane, b, c[b], p->rfill[d][b]);
         bar_flags(p, d, b, c[b]);
+        feel_strike(s, p, lane, b, c[b], &p->sflag[d][b * SEQ_STEPS]);
+        feel_strike(s, p, lane, b, p->rfill[d][b], NULL);
     }
     anticipate(s, p, d, c);
     for (int b = 0; b < p->filled; b++)
@@ -1269,6 +1418,7 @@ static void mjam_back(mjam_state_t *dst, const mjam_state_t *src) {
     *dst = *src;
     dst->set = now.set, dst->sw = now.sw, dst->push = now.push, dst->dyn = now.dyn;
     dst->swing = now.swing, dst->acc = now.acc, dst->weak = now.weak, dst->grid16 = now.grid16;   /* 0.21 */
+    dst->early = now.early, dst->loose = now.loose;
 }
 
 /* 0.19 the Bass note settings (bass.set) changed: every bar that plays them renders (not a note-locked one: its own are frozen) */
@@ -1314,7 +1464,27 @@ static void cx_turned(seq_t *s, seq_part_t *p, int lane, int was) {
 
 /* 0.20 the chords a JAM Melody's model reads: every slot's triad in its own scale (mjam_chord_of: never COLOUR's extensions), and
  * per bar of the loop the chord under each step (0.24 a change point's from its step) */
-typedef struct { mjam_chord_t ch[SEQ_SLOTS_ALL]; mjam_bar_in_t bar[SEQ_MAX_BARS]; } mel_harm_t;
+typedef struct { mjam_chord_t ch[SEQ_SLOTS_ALL]; mjam_bar_in_t bar[SEQ_MAX_BARS]; unsigned char land[SEQ_MAX_BARS][SEQ_STEPS]; } mel_harm_t;
+
+/* What makes two slots of one chord two chords on Feel (feel_runs) */
+static int feel_slot_same(const seq_feel_slot_t *x, const seq_feel_slot_t *y) {
+    return x->mute == y->mute && x->base == y->base && x->tone == y->tone && x->mtone == y->mtone && x->moct == y->moct && x->hand_n == y->hand_n && !memcmp(x->hand, y->hand, sizeof x->hand);
+}
+
+/* Two slots Feel shows as one chord */
+static int slots_one_chord(const seq_part_t *p, int a, int b) {
+    if (a >= SEQ_MAX_PROG || b >= SEQ_MAX_PROG) return 0;
+    return p->prog[a] == p->prog[b] && p->src[a] == p->src[b] && p->colour[a] == p->colour[b] && feel_slot_same(&p->fs[a], &p->fs[b]);
+}
+
+/* The settings a bar plays: a locked bar's own */
+static const mjam_set_t *mel_bar_set(const seq_part_t *p, int b) { return p->mjam.nlock >> b & 1 ? &p->mjam.frozen[b] : &p->mjam.set; }
+
+/* The model's input over mel_harm's chords */
+static mjam_loop_in_t mel_loop_in(const seq_t *s, const seq_part_t *p, const mel_harm_t *h, const mjam_set_t *set) {
+    mjam_loop_in_t in = {s->key, s->scale, p->bars, *set, h->bar, p->lane[LANE_MEL_UP].bar_var, h->land};
+    return in;
+}
 
 static void mel_harm(const seq_t *s, const seq_part_t *p, mel_harm_t *h) {
     for (int k = 0; k < SEQ_SLOTS_ALL; k++)
@@ -1323,16 +1493,61 @@ static void mel_harm(const seq_t *s, const seq_part_t *p, mel_harm_t *h) {
         h->bar[b].key = s->key, h->bar[b].scale = s->scale;
         for (int i = 0; i < SEQ_STEPS; i++) h->bar[b].chord[i] = &h->ch[slot_at(p, b, i)];
     }
+    memset(h->land, 0, sizeof h->land);
+    for (int t = 0, last = -1; t < p->bars * SEQ_STEPS; t++) {   /* a pick where its chord starts: a chord over several slots has one (as feel_runs) */
+        int sl = slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS);
+        if (sl != last && sl < SEQ_MAX_PROG && p->fs[sl].mtone && (last < 0 || !slots_one_chord(p, last, sl)))
+            h->land[t / SEQ_STEPS][t % SEQ_STEPS] = (unsigned char)MJ_LAND_CODE(p->fs[sl].mtone, p->fs[sl].moct);
+        last = sl;
+    }
+    for (int b = 0; b < p->bars; b++)
+        if (p->mjam.nlock >> b & 1) memcpy(h->land[b], p->mjam.fland[b], SEQ_STEPS);
+}
+
+/* The next chord's first note after step i of bar b, as the tune plays it: a half-step pick aims at it. 0: none in the loop */
+static int mel_next_note(const seq_part_t *p, const mjam_loop_in_t *in, int b, int i) {
+    const mjam_chord_t *now = in->bar[b % p->bars].chord[i];
+    for (int t = b * SEQ_STEPS + i + 1, n = 0; n < p->bars * SEQ_STEPS; t++, n++) {
+        int bb = t / SEQ_STEPS % p->bars, st = t % SEQ_STEPS;
+        mjam_note_t l[SEQ_STEPS];
+        if (in->bar[bb].chord[st] == now) continue;
+        mjam_bar(in, bb, mel_bar_set(p, bb), l);
+        for (int k = st; k < SEQ_STEPS && in->bar[bb].chord[k] == in->bar[bb].chord[st]; k++)
+            if (l[k].note) return l[k].note;
+        return 0;
+    }
+    return 0;
+}
+
+/* The note a step's pick plays: the tone nearest what the tune plays there, else the note before it, else the bar's first */
+static int mel_pick_note(const seq_part_t *p, const mjam_loop_in_t *in, int b, int i, int code, const mjam_note_t *line) {
+    const mjam_chord_t *ch = in->bar[b % p->bars].chord[i];
+    int tone = mjam_pick_tone(code), ref = line[i].note, pc;
+    for (int k = i - 1; k >= 0 && !ref; k--) ref = line[k].note;
+    for (int k = i + 1; k < SEQ_STEPS && !ref; k++) ref = line[k].note;
+    if (!ref) ref = 60 + in->key;
+    if (tone == MP_BLUE) pc = pmod(ch->third - 1, 12);
+    else if (tone == MP_BELOW || tone == MP_ABOVE) {
+        int nx = mel_next_note(p, in, b, i);
+        pc = pmod((nx ? nx : ch->root) + (tone == MP_BELOW ? -1 : 1), 12);
+    } else pc = ch->tone[tone - 1];
+    return mjam_fold(nearest_pc(pc, ref) + 12 * mjam_pick_oct(code));
 }
 
 /* 0.20 a JAM bar's fixes (mjam_state_t.fix) on its model line, bar its chords: a note sets the step's note (the holds after it
  * stay, now its own), REST silences the step, HOLD continues the note before. A hold with no note before it in the bar is silent;
  * a hold whose run a fix changed takes its note's tension (the model's own holds keep theirs) */
-static void mel_fix_line(const seq_t *s, const unsigned char *fix, const mjam_bar_in_t *bar, mjam_note_t line[SEQ_STEPS]) {
+static void mel_fix_line(const seq_part_t *p, const mjam_loop_in_t *in, int b, mjam_note_t line[SEQ_STEPS]) {
+    const unsigned char *fix = &p->mjam.fix[b * SEQ_STEPS];
+    const mjam_bar_in_t *bar = &in->bar[b % p->bars];
     int changed = 0;
     for (int i = 0; i < SEQ_STEPS; i++) {
         int f = fix[i], prev = i > 0 && (line[i - 1].note || line[i - 1].hold);
-        if (f >= 1 && f <= 127) line[i] = (mjam_note_t){(unsigned char)f, 0, (unsigned char)mjam_tension(s->key, s->scale, bar->chord[i], f, i)};
+        if (f >= 1 && f <= 127) line[i] = (mjam_note_t){(unsigned char)f, 0, (unsigned char)mjam_tension(in->key, in->scale, bar->chord[i], f, i)};
+        else if (mjam_is_pick(f)) {
+            int m = mel_pick_note(p, in, b, i, f, line);
+            line[i] = (mjam_note_t){(unsigned char)m, 0, (unsigned char)mjam_tension(in->key, in->scale, bar->chord[i], m, i)};
+        }
         else if (f == MJ_FIX_REST) line[i] = (mjam_note_t){0, 0, 0};
         else if (f == MJ_FIX_HOLD) line[i] = (mjam_note_t){0, 1, 0};
         else if (line[i].note) changed = 0;
@@ -1360,25 +1575,52 @@ static void mel_line_steps(const mjam_note_t *line, seq_step_t *st, int acc) {
  * bar's NEW BAR variation, then its fixes; h: mel_harm's chords. The one render of a bar: render_mel_into and mel_bar_line both use it.
  * 0.21 odd (if not NULL): mjam_swing16's test of the bar, from the render itself on an unlocked bar (a locked one shapes it again with
  * the live settings, as the grid reads them) */
-static void mel_render_bar(const seq_t *s, const seq_part_t *p, const mjam_loop_in_t *in, const mel_harm_t *h, int b, mjam_note_t line[SEQ_STEPS],
-                           int *odd) {
+static void mel_render_bar(const seq_part_t *p, const mjam_loop_in_t *in, int b, mjam_note_t line[SEQ_STEPS], int *odd) {
     int locked = p->mjam.nlock >> b & 1;
     mjam_bar_odd(in, b, locked ? &p->mjam.frozen[b] : &in->set, line, locked ? NULL : odd);
     if (odd && locked) *odd = mjam_swing16_bar(in, b);
-    mel_fix_line(s, &p->mjam.fix[b * SEQ_STEPS], &h->bar[b % p->bars], line);
+    mel_fix_line(p, in, b, line);
+}
+
+/* Early: a note that starts a chord, with no note starting between its new step and the chord, starts there and rings over the change, cutting short what it meets. A locked bar stays as it is */
+static void mel_early(const seq_t *s, const seq_part_t *p, mjam_note_t *lines) {
+    int n = AN_STEPS[p->mjam.early & 3], len = p->bars * SEQ_STEPS;
+    for (int j = 0; j < len; j++) {
+        int e = (j - n + len) % len, ok = lines[j].note && chord_change_at(s, p, j / SEQ_STEPS, j % SEQ_STEPS);
+        if (!ok || p->mjam.nlock >> (j / SEQ_STEPS) & 1 || p->mjam.nlock >> (e / SEQ_STEPS) & 1) continue;
+        for (int k = 1; k < n && ok; k++) ok = !lines[(j - k + len) % len].note;   /* a note exactly at its new step gives way */
+        if (!ok) continue;
+        lines[e] = lines[j];
+        for (int k = 1; k <= n; k++) lines[(e + k) % len] = (mjam_note_t){0, 1, lines[e].tension};
+    }
+}
+
+/* A note's length past its bar's line: Early's holds go on into the next bar */
+static void mel_early_lens(const seq_part_t *p, const mjam_note_t *lines, seq_step_t *steps) {
+    int len = p->bars * SEQ_STEPS;
+    for (int i = 0; i < len; i++) {
+        int l = steps[i].len;
+        if (!steps[i].on || i % SEQ_STEPS + l != SEQ_STEPS) continue;
+        while (l < len && lines[(i + l) % len].hold) l++;
+        steps[i].len = (unsigned char)(l > 255 ? 255 : l);
+    }
 }
 
 /* 0.20 a JAM Melody lane's lines and steps with settings `set`, every bar of the loop (mel_render_bar); 0.21 grid16 (if not NULL): the
  * loop's swing grid (mjam_swing16, from the bars as they render); steps NULL: the lines only; h: mel_harm's chords, once per setter */
 static void render_mel_into(const seq_t *s, const seq_part_t *p, const mel_harm_t *h, const mjam_set_t *set, mjam_note_t *lines,
                             seq_step_t *steps, int *grid16) {
-    mjam_loop_in_t in = {s->key, s->scale, p->bars, *set, h->bar, p->lane[LANE_MEL_UP].bar_var};
+    mjam_loop_in_t in = mel_loop_in(s, p, h, set);
     int g = 0;
     for (int b = 0; b < p->bars; b++) {   /* the visible loop: hidden bars (bars..filled-1) are re-rendered by regen_part when it grows */
         int odd = 0;
-        mel_render_bar(s, p, &in, h, b, &lines[b * SEQ_STEPS], grid16 && !g ? &odd : NULL);
+        mel_render_bar(p, &in, b, &lines[b * SEQ_STEPS], grid16 && !g ? &odd : NULL);
         g |= odd;
-        if (steps) mel_line_steps(&lines[b * SEQ_STEPS], &steps[b * SEQ_STEPS], p->mjam.acc);
+    }
+    if (p->mjam.early) mel_early(s, p, lines);
+    if (steps) {
+        for (int b = 0; b < p->bars; b++) mel_line_steps(&lines[b * SEQ_STEPS], &steps[b * SEQ_STEPS], p->mjam.acc);
+        if (p->mjam.early) mel_early_lens(p, lines, steps);
     }
     if (grid16) *grid16 = g;   /* 0.21 */
 }
@@ -1495,6 +1737,7 @@ static void djq_render(seq_t *s, int d) {
         memcpy(q->brole, t->brole, sizeof q->brole);
         q->bset = t->bass.set, q->nlock = t->bass.nlock;
         memcpy(q->frozen, t->bass.frozen, sizeof q->frozen);
+        memcpy(q->ftone, t->bass.ftone, sizeof q->ftone);
     } else {
         q->vstyle = t->vstyle, q->vmode = t->vmode, q->vcol = t->vcol, q->vinv = t->vinv, q->vspr = t->vspr, q->vstrdir = t->vstrdir;
         q->strum = t->lane_shape[LANE_CHORDS][SHAPE_STRUM], q->oct = t->lane_shape[LANE_CHORDS][SHAPE_OCT], q->voicing = t->voicing;
@@ -1533,6 +1776,7 @@ static void mel_repeat(seq_part_t *p, int from, int to, int bars) {
         p->mjam.frozen[b] = p->mjam.frozen[a];
         p->mjam.nlock = (unsigned short)((p->mjam.nlock & ~(1u << b)) | (unsigned)(p->mjam.nlock >> a & 1) << b);
         memcpy(&p->mjam.fix[b * SEQ_STEPS], &p->mjam.fix[a * SEQ_STEPS], SEQ_STEPS);
+        memcpy(p->mjam.fland[b], p->mjam.fland[a], SEQ_STEPS);
     }
 }
 
@@ -1642,6 +1886,8 @@ static void refresh(seq_t *s, int part) {
 static void others_follow(seq_t *s) {
     s->stale_mask |= s->used_mask & ~(1 << s->cur_part);
     if (s->queued >= 0) refresh(s, s->queued);
+    for (int i = 0; i < s->arr.n; i++)   /* 0.27 and every part of the song: seq_block switches to them on its own */
+        if (s->stale_mask >> s->arr.row[i].part & 1) refresh(s, s->arr.row[i].part);
 }
 
 /* 0.20 the part's Melody lane JAM at level 1 with GATE 50 (new instances, INIT); its melody state as mjam_init left it */
@@ -1656,11 +1902,19 @@ static void retire(seq_part_t *p) {
     p->lane[LANE_MEL_DOWN].gen = MANUAL_GEN;
 }
 
+/* 0.27 no song: every arrangement rule off */
+static void arr_clear(seq_arr_t *a) {
+    memset(a, 0, sizeof *a);
+    a->cur = a->jump = a->edit = a->next_row = -1;
+    a->follow = 1;
+}
+
 void seq_init(seq_t *s, seq_emit_fn emit, void *ctx) {
     unsigned char pat[SEQ_LANES][SEQ_STEPS];
     rhythm_init();
     level_table_init();
     memset(s, 0, sizeof *s);
+    arr_clear(&s->arr);
     s->emit = emit;
     s->ctx = ctx;
     s->rate = 44100.0;
@@ -1941,6 +2195,16 @@ void seq_set_scale(seq_t *s, int scale) {
 static void push_undo(seq_t *s, int lane);
 static void colour_changed(seq_t *s, seq_part_t *p);
 
+/* Preset i into every slot: borrows, colours, locks and 0.28's mutes and bases go (the caller revoices) */
+static void prog_preset_apply(seq_part_t *p, int i) {
+    memset(p->src, 0, sizeof p->src);
+    memset(p->colour, 0, sizeof p->colour);
+    memset(p->fs, 0, sizeof p->fs);
+    p->slot_lock = 0;
+    fill_phrase(p, THEORY_PRESETS[i].len, THEORY_PRESETS[i].deg, NULL, NULL);   /* 0.14: the phrase over the loop */
+    p->rank_len = THEORY_PRESETS[i].len;   /* a deal: the ranks follow the new phrase */
+}
+
 /* Leaving a Custom progression (HARMONY GEN's, matching no preset) pushes an undo snapshot; preset to preset doesn't.
  * A preset replaces every slot: borrows, colours and locks go (an explicit choice). */
 void seq_set_prog_preset(seq_t *s, int i) {
@@ -1951,11 +2215,7 @@ void seq_set_prog_preset(seq_t *s, int i) {
     seq_txn_done(s);
     act(s);
     if (was < 0 || p->slot_lock) push_undo(s, -1);   /* borrows, colours (was < 0) or locks go: undoable */
-    memset(p->src, 0, sizeof p->src);
-    memset(p->colour, 0, sizeof p->colour);
-    p->slot_lock = 0;
-    fill_phrase(p, THEORY_PRESETS[i].len, THEORY_PRESETS[i].deg, NULL, NULL);   /* 0.14: the phrase over the loop */
-    p->rank_len = THEORY_PRESETS[i].len;   /* a deal: the ranks follow the new phrase */
+    prog_preset_apply(p, i);
     revoice(s, p);
     regen_harmony(s, p);
 }
@@ -1967,7 +2227,7 @@ void seq_set_voicing(seq_t *s, int v) {
 
 void seq_set_vmode(seq_t *s, int mode) {
     if (mode < 0 || mode >= VMODE_COUNT) return;
-    if (mode != cur(s)->vmode) act(s);
+    if (mode != cur(s)->vmode) act(s), feel_hands_clear(cur(s));
     set_vmode(cur(s), mode);
     revoice(s, cur(s));
 }
@@ -1998,6 +2258,10 @@ static int cluster_note(const seq_t *s, const seq_part_t *p, int slot, const int
  * Cluster. */
 static int spread_notes(const seq_t *s, const seq_part_t *p, int slot, int oct, int inv, int spread, int out[THEORY_CHORD_MAX]) {
     int n = p->voice_n[slot];
+    if (feel_final(p, slot)) {   /* 0.28 notes placed by hand: only the step's own octave */
+        for (int i = 0; i < n; i++) out[i] = p->voice[slot][i] + 12 * (oct - LANE_OCT[LANE_CHORDS]);
+        return n;
+    }
     oct += lshape(p, LANE_CHORDS, L_OCT, 0);
     for (int i = 0; i < n; i++) out[i] = p->voice[slot][i];
     for (int k = 0; n > 0 && k < iabs(inv); k++) {
@@ -2095,6 +2359,7 @@ static void dj_steps_at(const seq_t *s, const seq_part_t *p, int d, int var, int
             continue;
         }
         render_bar_at(p, lane, b, var, tm, c, fill);
+        feel_strike(s, p, lane, b, c, NULL);
         rhythm_to_steps(c, x);
         if (d != DL_BASS) continue;
         bar_harm(s, p, b, k, &h);
@@ -2436,7 +2701,8 @@ static void sound_hit(seq_t *s, int lane, int bar, int step, int note, int len, 
     int n[THEORY_CHORD_MAX], c = note ? (n[0] = note, 1) : step_notes(s, lane, bar, step, n);
     double gf = gate_curve(is_recipe(p, lane) || jam_lane(p, lane) ? p->mel.kn[MK_GATE] : lshape(p, lane, L_GATE, 50)), dt = 0;
     if (lane == LANE_CHORDS) {
-        int down;
+        int down, at = step_slot(p, bar, step);
+        if (at < SEQ_MAX_PROG && p->fs[at].mute) return;   /* 0.28 a muted chord: Bass and Melody play on */
         dt = strum_gap(p, &down);
         drop_strum(s, LANE_CHORDS, t + late);
         if (dt > 0 && down)   /* 0.17: high to low */
@@ -2468,6 +2734,11 @@ static void hum_due(seq_t *s, double before) {
  * xf_rank(seed, i, SALT_HUM) x h x 4 / 100 ms (0..16 ms at 4) at the block's tempo and moves *v by -3h..+3h by a second rank:
  * the same on every loop pass (0.19: the lane's own seed). Delay only: a hit still waiting plays first (at any h), so none sounds
  * before the hit before it. 1 when the hit waits (s->hum, the lane's), 0 when it plays now. */
+static double hum_amounts(const seq_t *s, int seed, int i, int h, int *v) {   /* moves the velocity, returns the delay */
+    *v += xf_rank(seed, i, SALT_HUMV) * (6 * h + 1) / 100 - 3 * h;
+    return xf_rank(seed, i, SALT_HUM) * h * 4 / 100.0 * s->bpm / 60000.0;
+}
+
 static int humanize(seq_t *s, const seq_part_t *p, int lane, int bar, int step, int note, int len, int *v, double t) {
     int dl = dl_of(lane), h = lane_drawn(p, lane) ? rk_at(p, lane, RK_HUM, lane_rcx(p, lane)) : 0, i = bar * SEQ_STEPS + step,
         seed = p->lane[lane].gen.seed;
@@ -2476,9 +2747,8 @@ static int humanize(seq_t *s, const seq_part_t *p, int lane, int bar, int step, 
         hum_play(s, dl);
     }
     if (!h) return 0;
-    *v += xf_rank(seed, i, SALT_HUMV) * (6 * h + 1) / 100 - 3 * h;
+    double d = hum_amounts(s, seed, i, h, v);
     *v = *v < 1 ? 1 : *v > 127 ? 127 : *v;
-    double d = xf_rank(seed, i, SALT_HUM) * h * 4 / 100.0 * s->bpm / 60000.0;
     if (d <= 0) return 0;
     s->hum[dl] = (seq_hum_t){1, bar, step, len, *v, note, t + d};
     return 1;
@@ -2522,6 +2792,11 @@ static void fire_lane(seq_t *s, int lane, int bar, int step, long k, double t) {
     /* a DRAWN Chords step's abs is always 0 (only rhythm_to_steps writes its steps), so x.abs is safe: a DRAWN Bass's note or 0 */
     int v = 64 + (x.vel - 64) * lane_dyn(p, lane) / 50, note = lane_drawn(p, lane) ? x.abs : 0;
     double late = lane_swing_late(s, p, lane, bar, step, k);
+    if (jam_lane(p, lane) && p->mjam.early) {   /* an Early note: it sounds into the chord change, and a jump back keeps it */
+        int i = bar * SEQ_STEPS + step, n = AN_STEPS[p->mjam.early & 3], to = (i + n) % (p->bars * SEQ_STEPS);
+        if (x.len > n && p->mline[to].hold && chord_change_at(s, p, to / SEQ_STEPS, to % SEQ_STEPS)) s->early_k[lane] = k + n;
+    }
+    if (jam_lane(p, lane) && p->mjam.loose) late += hum_amounts(s, p->lane[lane].gen.seed, bar * SEQ_STEPS + step, p->mjam.loose, &v);   /* Loose: through SWING's queue */
     v = v < 1 ? 1 : v > 127 ? 127 : v;
     if (dl_of(lane) >= 0 && humanize(s, p, lane, bar, step, note, x.len, &v, t + late)) return;
     sound_hit(s, lane, bar, step, note, x.len, v, t, late);
@@ -2535,6 +2810,12 @@ static void fire_tied(seq_t *s, int lane, int bar, int step, long k, double t) {
     const seq_part_t *p = ccur(s);
     int d = dl_of(lane), len = p->bars * SEQ_STEPS, i = bar * SEQ_STEPS + step, n, e, v;
     seq_step_t x;
+    if (jam_lane(p, lane) && p->mjam.early && p->mline[i].hold && chord_change_at(s, p, bar, step) && !p->lane[lane].mute && s->early_k[lane] != k) {   /* the Melody's Early */
+        n = AN_STEPS[p->mjam.early & 3], e = (i - n + len) % len;
+        x = play_step(p, lane, e / SEQ_STEPS, e % SEQ_STEPS, k - n);
+        if (x.on && x.len > n) sound_hit(s, lane, e / SEQ_STEPS, e % SEQ_STEPS, 0, x.len - n, x.vel, t, 0);
+        return;
+    }
     if (d < 0 || !lane_drawn(p, lane) || !(p->sflag[d][i] & SF_TIED) || p->lane[lane].mute || s->early_k[lane] == k) return;
     n = AN_STEPS[p->an[d]], e = (i - n + len) % len;
     x = play_step(p, lane, e / SEQ_STEPS, e % SEQ_STEPS, k - n);
@@ -2635,6 +2916,7 @@ static void djq_commit(seq_t *s, int d) {
             memcpy(p->brole, q->brole, n);
             p->bass.set = q->bset, p->bass.nlock = q->nlock;
             memcpy(p->bass.frozen, q->frozen, sizeof q->frozen);
+            memcpy(p->bass.ftone, q->ftone, sizeof q->ftone);
         } else {
             p->vstyle = q->vstyle, p->vmode = q->vmode, p->vcol = q->vcol, p->vinv = q->vinv, p->vspr = q->vspr, p->vstrdir = q->vstrdir;
             p->lane_shape[LANE_CHORDS][SHAPE_STRUM] = q->strum, p->lane_shape[LANE_CHORDS][SHAPE_OCT] = q->oct, p->voicing = q->voicing;
@@ -2646,6 +2928,12 @@ static void djq_commit(seq_t *s, int d) {
         s->dj_switched |= 1 << d;
     }
     q->c = -1;
+}
+
+/* 0.24 a block took over: a tied step its new steps start on chases (nothing sounds into it) */
+static void djq_chase(seq_t *s) {
+    for (int l = 0; l < DL_COUNT; l++)
+        if (s->early_k[DLANE[l].lane] < 0) s->chase |= 1u << DLANE[l].lane;
 }
 
 /* 0.22 every drawn lane's queue dropped (a part switch, a load, INIT); a tap's undo entries leave at the next UNDO or tap (djq_sweep) */
@@ -2676,7 +2964,7 @@ static void push_next(seq_t *s, double end) {
     for (int lane = 0; lane < SEQ_ACTIVE_LANES; lane++) {
         int push = lane_push(p, lane);
         if (!push || s->pushed_k[lane] == k || (lane == LANE_MEL_UP && mel_switch_due(s, k)) || (dl_of(lane) >= 0 && djq_due(s, dl_of(lane), k)) ||
-            !play_step(p, lane, idx / SEQ_STEPS, idx % SEQ_STEPS, k).on || p->lane[lane].mute) continue;
+            s->hold_k[lane] == k + 1 || !play_step(p, lane, idx / SEQ_STEPS, idx % SEQ_STEPS, k).on || p->lane[lane].mute) continue;
         double t = step_time(s, k) - push / 100.0 * 0.125;
         if (t >= end - EPS) continue;
         s->pushed_k[lane] = k;
@@ -2734,6 +3022,78 @@ static long first_k_at(const seq_t *s, double ppq) {
     return s->swing && ((k - 1) & 1) && step_time(s, k - 1) >= ppq - EPS ? k - 1 : k;
 }
 
+/* A lane of the playing part muted or heard, no setter's bookkeeping (0.27: the audio thread applies a row's mutes) */
+static void mute_lane(seq_t *s, int lane, int muted) {
+    cur(s)->lane[lane].mute = muted ? 1 : 0;
+    if (!muted) return;
+    if (lane == LANE_CHORDS) memset(&s->keys, 0, sizeof s->keys);
+    release_where(s, -INFINITY, 0x80 | (seq_channel(s, lane) - 1));   /* the sequence keeps running; only its sound stops */
+    drop_strum(s, lane, -INFINITY);
+    if (dl_of(lane) >= 0) s->hum[dl_of(lane)].on = 0;   /* and HUMANIZE's waiting hit */
+}
+
+/* 0.27 the playing row is the playing part's (its mutes are the part's). 0.27.1 a row Edit mode holds too: it plays its own mutes */
+static int arr_playing_row(const seq_t *s) {
+    const seq_arr_t *a = &s->arr;
+    return a->n && a->cur >= 0 && a->row[a->cur].part == s->cur_part;
+}
+
+/* 0.27 the playing part takes mute mask m (bit lane) */
+static void arr_mutes(seq_t *s, int m) {
+    for (int l = 0; l < SEQ_ACTIVE_LANES; l++)
+        if (cur(s)->lane[l].mute != (m >> l & 1)) mute_lane(s, l, m >> l & 1);
+}
+
+static void switch_part(seq_t *s, long origin_k);
+
+/* 0.27 row `row` starts at step k: its part from its bar 1 (a switch, or the same part counted from k), then its mutes */
+static void arr_start(seq_t *s, int row, long k) {
+    seq_arr_t *a = &s->arr;
+    int part = a->row[row].part;
+    if (part != s->cur_part) {
+        s->queued = part;   /* ready since seq_arr_set (ready_part) */
+        switch_part(s, k);
+    } else {
+        s->part_origin_k = k;
+        a->fresh = 1;
+    }
+    a->cur = row;
+    a->pass = 0;
+    arr_mutes(s, a->row[row].mute);   /* 0.27.1 Edit mode too: the held row sounds as it does in the song */
+}
+
+/* 0.27 a part button's queued part took over: the playing row is the one seq_select_part picked (next_row: SEQ_ARR_MAX the song
+ * lacks the part) */
+static void arr_selected(seq_t *s) {
+    seq_arr_t *a = &s->arr;
+    if (a->next_row < 0) return;
+    a->cur = a->next_row < a->n ? a->next_row : -1;
+    a->pass = 0;
+    a->next_row = -1;
+}
+
+/* 0.27 the arrangement at step k, before it fires (the audio thread: indices and mute bytes only). A pass of the playing part ends
+ * at every loop boundary after its bar 1; at the end of the row's last pass, following and not held, the next row starts (the
+ * first after the last; row 0 when the playing row was removed) */
+static void arr_step(seq_t *s, long k) {
+    seq_arr_t *a = &s->arr;
+    int first = a->fresh && k == s->part_origin_k;   /* the row's (the part's) first step: no pass ended. A host loop that wraps
+                                                      * onto it later ends one (final review: the song stuck on the row) */
+    a->fresh = 0;
+    if (!a->n || first) return;
+    if (a->jump >= 0 && !floor_mod(k - s->part_origin_k, SEQ_STEPS)) {   /* a jump at the bar line */
+        int row = a->jump;
+        a->jump = -1;
+        arr_start(s, row, k);
+        return;
+    }
+    if (floor_mod(k - s->part_origin_k, cur(s)->bars * SEQ_STEPS)) return;
+    a->pass++;
+    if (!a->follow || a->edit >= 0) return;
+    if (a->cur < 0) arr_start(s, 0, k);
+    else if (a->pass >= a->row[a->cur].passes) arr_start(s, (a->cur + 1) % a->n, k);
+}
+
 /* The queued part takes over (its catch-up ran when it was queued): only indices change here, on the audio thread. */
 static void switch_part(seq_t *s, long origin_k) {
     release_all(s);   /* as a loop wrap does */
@@ -2743,6 +3103,7 @@ static void switch_part(seq_t *s, long origin_k) {
     djq_drop_all(s);   /* 0.22: and the drawn lanes' */
     s->move_text[0] = 0;   /* the old part's move feedback does not carry over */
     s->part_origin_k = origin_k;
+    s->arr.fresh = 1;   /* 0.27 its first step is not a pass end */
     if (cur(s)->lane[LANE_CHORDS].mute) memset(&s->keys, 0, sizeof s->keys);   /* 0.26 the mutes are the new part's */
     if (s->txn.kind) s->txn.stale = 1;   /* 0.17: an open picker or browser is the old part's: the next setter cancels it */
     paging_off(s);   /* and a paging pause ends (ruling 18) */
@@ -2786,7 +3147,15 @@ static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
             s->idle_ppq = 0;
             s->playing = 0;
             s->cur_k = -1;
-            if (s->queued >= 0) switch_part(s, 0);   /* as a tap while stopped would */
+            if (s->arr.jump >= 0) {   /* 0.27 a song's jump too */
+                int row = s->arr.jump;
+                s->arr.jump = -1;
+                arr_start(s, row, 0);
+            }
+            if (s->queued >= 0) {   /* as a tap while stopped would */
+                switch_part(s, 0);
+                arr_selected(s);
+            }
             if (s->mjq_c >= 0) mel_commit(s);         /* 0.20: a queued JAM block too (a part switch dropped it) */
             for (int d = 0; d < DL_COUNT; d++)
                 if (s->djq[d].c >= 0) djq_commit(s, d);   /* 0.22: and the drawn lanes' */
@@ -2800,6 +3169,7 @@ static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
         s->playing = 1;
         s->part_origin_k = kp - floor_mod(kp, SEQ_STEPS);   /* 0.16: the part's bar 1 is the MPC bar the start is in (a
                                                              * clip launch or PLAY starts the plugin's loop, not the song's) */
+        s->arr.fresh = 1;   /* 0.27 */
         forget_pushes(s);
         for (int i = 0; i < s->npending; i++) s->pending[i].off_ppq += ppq - s->idle_ppq;   /* auditions: onto the song clock */
         s->idle_ppq = 0;
@@ -2829,22 +3199,30 @@ static void block(seq_t *s, double ppq, double bpm, int playing, int frames) {
     /* In order, each once: next_k only moves forward. Start and resync put step_time(next_k) at or after `start`, so every
      * step reached fires; one whose time moved before `start` (SWING lowered while it was pending) fires late, not never. */
     while (step_time(s, s->next_k) < end - EPS) {
+        if (s->halt_k && s->next_k >= s->halt_k) {   /* VST-66 */
+            s->halted = 1;
+            break;
+        }
         long k = s->next_k++;
         hum_due(s, step_time(s, k));   /* 0.18: HUMANIZE's waiting hit, then */
         strum_due(s, step_time(s, k));   /* the last chord's strum before this step (and before a switch drops it) */
-        if (s->queued >= 0 && floor_mod(k - s->part_origin_k, SEQ_STEPS) == 0) switch_part(s, k);   /* a bar line */
+        arr_step(s, k);   /* 0.27 the song's next row at a pass end */
+        if (s->queued >= 0 && floor_mod(k - s->part_origin_k, SEQ_STEPS) == 0) {   /* a bar line */
+            switch_part(s, k);
+            arr_selected(s);
+        }
         if (mel_switch_due(s, k)) mel_commit(s);   /* 0.20: a queued JAM block at its SWITCH AT boundary (after a part switch's drop) */
         for (int d = 0; d < DL_COUNT; d++)
             if (djq_due(s, d, k)) {   /* 0.22: the drawn lanes' each at its own */
                 djq_commit(s, d);
-                for (int l = 0; l < DL_COUNT; l++)   /* 0.24 a tied step its new steps start on chases (nothing sounds into it) */
-                    if (s->early_k[DLANE[l].lane] < 0) s->chase |= 1u << DLANE[l].lane;
+                djq_chase(s);
             }
+        if (s->step_fn) s->step_fn(s->step_ctx, k);   /* VST-66 */
         fire(s, k);
     }
     hum_due(s, end);
     strum_due(s, end);
-    push_next(s, end);
+    if (!s->halted) push_next(s, end);
     s->last_ppq = end;
 }
 
@@ -3081,14 +3459,12 @@ int seq_mel_poll(seq_t *s) {
 }
 
 void seq_set_mute(seq_t *s, int lane, int muted) {
+    seq_arr_t *a = &s->arr;
     if (lane < 0 || lane >= SEQ_ACTIVE_LANES) return;
     if (cur(s)->lane[lane].mute != (muted ? 1 : 0)) act(s);
-    cur(s)->lane[lane].mute = muted ? 1 : 0;
-    if (!muted) return;
-    if (lane == LANE_CHORDS) memset(&s->keys, 0, sizeof s->keys);
-    release_where(s, -INFINITY, 0x80 | (seq_channel(s, lane) - 1));   /* the sequence keeps running; only its sound stops */
-    drop_strum(s, lane, -INFINITY);
-    if (dl_of(lane) >= 0) s->hum[dl_of(lane)].on = 0;   /* and HUMANIZE's waiting hit */
+    if (arr_playing_row(s))   /* 0.27 the playing row's mute too */
+        a->row[a->cur].mute = (unsigned char)((a->row[a->cur].mute & ~(1 << lane)) | (muted ? 1 << lane : 0));
+    mute_lane(s, lane, muted);
 }
 
 int seq_mute(const seq_t *s, int lane) { return lane >= 0 && lane < SEQ_ACTIVE_LANES && ccur(s)->lane[lane].mute; }
@@ -3107,6 +3483,7 @@ static void repeat_bars(seq_lane_t *ln, int from, int to, int bars) {
 static void bass_repeat_bar(seq_part_t *p, int b, int a) {
     p->lane[LANE_BASS].bar_var[b] = p->lane[LANE_BASS].bar_var[a];
     p->bass.frozen[b] = p->bass.frozen[a];
+    memcpy(p->bass.ftone[b], p->bass.ftone[a], sizeof p->bass.ftone[b]);
     p->bass.nlock = (unsigned short)((p->bass.nlock & ~(1u << b)) | (unsigned)(p->bass.nlock >> a & 1) << b);
     memcpy(&p->bass.fix[b * SEQ_STEPS], &p->bass.fix[a * SEQ_STEPS], SEQ_STEPS);
 }
@@ -3129,14 +3506,10 @@ static void repeat_rbars(seq_part_t *p, int lane, int from, int to, int bars) {
     }
 }
 
-void seq_set_bars(seq_t *s, int bars) {
-    seq_part_t *p = cur(s);
-    if ((bars != 1 && bars != 2 && bars != 4 && bars != 8 && bars != 16) || bars == p->bars) return;
-    for (int d = 0; d < DL_COUNT; d++)
-        if (txn_live(s, DLANE[d].lane, CVIEW_BAR) && s->txn.slot >= bars) txn_cancel(s);   /* 0.18: the open bar leaves the loop */
-    if (txn_live(s, LANE_MEL_UP, TXN_MEDIT) && s->txn.slot >= bars) txn_cancel(s);   /* 0.20: and the Melody's */
-    seq_txn_done(s);   /* 0.17 (ruling 24): CANCEL never undoes the length */
-    act(s);
+static void arr_clamp(seq_t *s);
+
+/* Part p's loop becomes `bars` long (seq_set_bars's change; the caller revoices, renders and clamps the song rows) */
+static void bars_set(seq_t *s, seq_part_t *p, int bars) {
     /* Never-filled bars repeat the loop (and its locks), so it sounds the same. A bar a shrink hid keeps its steps
      * (filled >= bars). A generated lane then regenerates over the new length, its hand edits kept. */
     int from = p->prog_len, to;
@@ -3151,11 +3524,31 @@ void seq_set_bars(seq_t *s, int bars) {
     grow_slots(p, from, to);
     if (s->view_bar >= bars) s->view_bar = 0;
     strip_clamp(s);
+}
+
+void seq_set_bars(seq_t *s, int bars) {
+    seq_part_t *p = cur(s);
+    if ((bars != 1 && bars != 2 && bars != 4 && bars != 8 && bars != 16) || bars == p->bars) return;
+    for (int d = 0; d < DL_COUNT; d++)
+        if (txn_live(s, DLANE[d].lane, CVIEW_BAR) && s->txn.slot >= bars) txn_cancel(s);   /* 0.18: the open bar leaves the loop */
+    if (txn_live(s, LANE_MEL_UP, TXN_MEDIT) && s->txn.slot >= bars) txn_cancel(s);   /* 0.20: and the Melody's */
+    seq_txn_done(s);   /* 0.17 (ruling 24): CANCEL never undoes the length */
+    act(s);
+    bars_set(s, p, bars);
     revoice(s, p);
     regen_part(s, p);
+    arr_clamp(s);   /* 0.27 its song rows at most 64 bars */
 }
 
 /* 0.14: the slots remapped by time, one undo step (its snapshot holds the length) */
+/* A part's chord length, its slots following (the caller revoices and renders) */
+static void chord_len_to(seq_t *s, seq_part_t *p, int steps) {
+    int old = p->chord_len;
+    p->chord_len = steps;
+    strip_clamp(s);
+    if (steps != old) remap_slots(p, old);
+}
+
 void seq_set_chord_len(seq_t *s, int steps) {
     seq_part_t *p = cur(s);
     int old = p->chord_len;
@@ -3163,9 +3556,7 @@ void seq_set_chord_len(seq_t *s, int steps) {
     seq_txn_done(s);
     act(s);
     push_undo(s, -1);
-    p->chord_len = steps;
-    strip_clamp(s);
-    remap_slots(p, old);
+    chord_len_to(s, p, steps);
     revoice(s, p);
     regen_part(s, p);
 }
@@ -3308,14 +3699,20 @@ static void out_bset(out_t *o, const bass_set_t *b, char sep) {
 /* 0.19 a DRAWN Bass lane's fields (its DLANE save_extra): ln's `.bv` (as today), then its notes: `|<c>2.ab=` its fixed notes (bass.fix,
  * below filled, sounding or not) as <step hex2><note hex2> pairs, only when there is one; `|<c>2.bx=` the note settings (out_bset),
  * only when not Pop Root's; `|<c>2.bl=` each note-locked bar below filled as bar:style.pedal.octave.mov.octs.app.reg, `;`-separated,
- * only when there is one */
+ * only when there is one; `|<c>2.bf=` the tones of each such bar that has one: <bar hex1><17 hex1>; `|<c>2.ap=` its picks (bass.fix above any MIDI note), <step hex2><code hex2>, only when there is one */
 static void out_bass(out_t *o, char c, const seq_part_t *p, const seq_lane_t *ln) {
     const bass_set_t pop = bass_style_set(BASS_POP_ROOT);
     int n = 0;
     if (any_bar_var(ln)) out_bar_var(o, c, LANE_BASS, ln);
     for (int i = 0; i < p->filled * SEQ_STEPS; i++) {
-        if (!p->bass.fix[i]) continue;
+        if (!p->bass.fix[i] || bass_is_pick(p->bass.fix[i])) continue;
         if (!n++) outf(o, "|%c2.ab=", c);
+        outf(o, "%02x%02x", i, p->bass.fix[i]);
+    }
+    n = 0;
+    for (int i = 0; i < p->filled * SEQ_STEPS; i++) {
+        if (!bass_is_pick(p->bass.fix[i])) continue;
+        if (!n++) outf(o, "|%c2.ap=", c);
         outf(o, "%02x%02x", i, p->bass.fix[i]);
     }
     if (memcmp(&p->bass.set, &pop, sizeof pop)) {
@@ -3328,6 +3725,14 @@ static void out_bass(out_t *o, char c, const seq_part_t *p, const seq_lane_t *ln
         if (n++) outf(o, ";%d:", b);
         else outf(o, "|%c2.bl=%d:", c, b);
         out_bset(o, &p->bass.frozen[b], '.');
+    }
+    n = 0;
+    for (int b = 0; b < p->filled; b++) {
+        static const unsigned char NONE[SEQ_STEPS + 1];
+        if (!(p->bass.nlock >> b & 1) || !memcmp(p->bass.ftone[b], NONE, sizeof NONE)) continue;
+        if (!n++) outf(o, "|%c2.bf=", c);
+        outf(o, "%x", b);
+        for (int a = 0; a <= SEQ_STEPS; a++) outf(o, "%x", p->bass.ftone[b][a]);
     }
 }
 
@@ -3378,6 +3783,30 @@ static void out_mnew(out_t *o, char c, const seq_part_t *p) {
     }
 }
 
+/* The iOS Melody pages' fields, each only when used: `3.jp=` the steps' picks, <step hex2><code hex2>; `3.jt=` a kept bar's picks, <bar hex1><step hex1><code hex2>; `3.je=` <early><loose>;
+ * `3.jc=` <cadc 1><the locked bars with it, hex4> */
+static void out_mfeel(out_t *o, char c, const seq_part_t *p) {
+    const mjam_state_t *m = &p->mjam;
+    int n = 0;
+    unsigned locks = 0;
+    for (int i = 0; i < p->filled * SEQ_STEPS; i++) {
+        if (!mjam_is_pick(m->fix[i])) continue;
+        if (!n++) outf(o, "|%c3.jp=", c);
+        outf(o, "%02x%02x", i, m->fix[i]);
+    }
+    n = 0;
+    for (int b = 0; b < p->filled; b++)
+        for (int i = 0; i < SEQ_STEPS; i++) {
+            if (!(m->nlock >> b & 1) || !m->fland[b][i]) continue;
+            if (!n++) outf(o, "|%c3.jt=", c);
+            outf(o, "%x%x%02x", b, i, m->fland[b][i]);
+        }
+    if (m->early || m->loose) outf(o, "|%c3.je=%d%d", c, m->early, m->loose);
+    for (int b = 0; b < p->filled; b++)
+        if (m->nlock >> b & 1 && m->frozen[b].cadc) locks |= 1u << b;
+    if (m->set.cadc || locks) outf(o, "|%c3.jc=%d%04x", c, m->set.cadc, locks);
+}
+
 /* 0.20 a JAM Melody lane's fields, after its `3.g` (no step records, locks or recipe): ln's `.bv` (as today), then each only when not
  * a new instance's: `|<c>3.jx=` the settings (out_mset), `|<c>3.jw=` SWITCH AT 0..3, `|<c>3.jk=` PUSH,GATE,DYNAMICS, `|<c>3.jl=` each
  * locked bar below filled as bar:<its frozen settings>, `;`-separated, `|<c>3.jf=` the fixed steps below filled as <step hex2><value
@@ -3388,7 +3817,7 @@ static void out_mjam(out_t *o, char c, const seq_part_t *p, const seq_lane_t *ln
     int n = 0, gate = p->mel.kn[MK_GATE];
     if (any_bar_var(ln)) out_bar_var(o, c, LANE_MEL_UP, ln);
     mjam_set_t x = m->set;
-    x.dens = x.rng = x.var = x.tm = 0;   /* 0.21: not in jx (0.20 loaders need exactly 12 characters) */
+    x.dens = x.rng = x.var = x.tm = x.cadc = 0;   /* 0.21: not in jx (0.20 loaders need exactly 12 characters); cadc in jc */
     if (memcmp(&x, &d, sizeof d)) {
         outf(o, "|%c3.jx=", c);
         out_mset(o, m->set);
@@ -3403,11 +3832,12 @@ static void out_mjam(out_t *o, char c, const seq_part_t *p, const seq_lane_t *ln
     }
     n = 0;
     for (int i = 0; i < p->filled * SEQ_STEPS; i++) {
-        if (!m->fix[i]) continue;
+        if (!m->fix[i] || mjam_is_pick(m->fix[i])) continue;
         if (!n++) outf(o, "|%c3.jf=", c);
         outf(o, "%02x%02x", i, m->fix[i]);
     }
     out_mnew(o, c, p);
+    out_mfeel(o, c, p);
 }
 
 /* A MANUAL lane saves every on-step; a generated one its recipe (g), its locks (lk) and only its locked on-steps, the
@@ -3449,12 +3879,15 @@ static void save_lane(out_t *o, const seq_t *s, char c, const seq_part_t *p, con
         if (ln->steps[i].on && ln->steps[i].abs && (!gen || locked(ln, i))) outf(o, "%02x%02x", i, ln->steps[i].abs);
 }
 
+/* 0.28 a slot's src in the older fields: a chromatic chord (`.cx` holds it) saves as degree 0 of the scale, whose degree it already holds */
+static int old_src(int src) { return src > THEORY_NBORROW ? 0 : src; }
+
 /* 0.14 `|<c>.ch=`: every slot of the loop, 4 characters each, <degree 0-6><src 0-3><colour 0-4><lock 0|1> */
 static void out_slot_chords(out_t *o, char c, const prog_view_t *v) {
     char d[4 * SEQ_MAX_PROG + 1];
     for (int i = 0; i < v->len; i++) {
         d[4 * i] = (char)('0' + v->prog[i]);
-        d[4 * i + 1] = (char)('0' + v->src[i]);
+        d[4 * i + 1] = (char)('0' + old_src(v->src[i]));
         d[4 * i + 2] = (char)('0' + v->colour[i]);
         d[4 * i + 3] = (char)('0' + (int)(v->lock >> i & 1));
     }
@@ -3496,6 +3929,44 @@ static void out_hoct(out_t *o, char c, const seq_part_t *p) {
     if (w > d) outf(o, "|%c.ho=%s", c, d);
 }
 
+/* 0.28 Feel, each only when used, in hex: `.cx=` per slot with a chromatic chord, a mute or a base: <slot 2><src 2><mute 1><base 4>;
+ * `.vh=` per run of equal hand notes, comma-separated: <slot 2><count 2><n 1><note 2>..; `.vr=` the recipe: <n 1>, then <role 1><note 2>..;
+ * `.fm=1` a Feel write's chord length (seq_part_t.feel_spans); `.bt=` per slot with a Bass tone: <slot 2><tone 1> */
+static void out_feel(out_t *o, char c, const seq_part_t *p) {
+    int cx = 0;
+    if (p->feel_spans) outf(o, "|%c.fm=1", c);
+    for (int i = 0; i < p->prog_len; i++)
+        if (p->src[i] > THEORY_NBORROW || p->fs[i].mute || p->fs[i].base) {
+            if (!cx++) outf(o, "|%c.cx=", c);
+            outf(o, "%02x%02x%x%04x", i, p->src[i], p->fs[i].mute, p->fs[i].base);
+        }
+    for (int i = 0, vh = 0; i < p->prog_len; i++) {
+        const seq_feel_slot_t *f = &p->fs[i];
+        int run = 1;
+        if (!f->hand_n) continue;
+        while (i + run < p->prog_len && p->fs[i + run].hand_n == f->hand_n && !memcmp(p->fs[i + run].hand, f->hand, sizeof f->hand)) run++;
+        if (!vh++) outf(o, "|%c.vh=", c);
+        else outf(o, ",");
+        outf(o, "%02x%02x%x", i, run, f->hand_n);
+        for (int k = 0; k < f->hand_n; k++) outf(o, "%02x", f->hand[k]);
+        i += run - 1;
+    }
+    if (p->rc.n) {
+        outf(o, "|%c.vr=%x", c, p->rc.n);
+        for (int k = 0; k < p->rc.n; k++) outf(o, "%x%02x", p->rc.role[k], p->rc.note[k]);
+    }
+    for (int i = 0, bt = 0; i < p->prog_len; i++)
+        if (p->fs[i].tone) {
+            if (!bt++) outf(o, "|%c.bt=", c);
+            outf(o, "%02x%x", i, p->fs[i].tone);
+        }
+    for (int i = 0, mt = 0; i < p->prog_len; i++)
+        if (p->fs[i].mtone) {
+            if (!mt++) outf(o, "|%c.mt=", c);
+            outf(o, "%02x%x%x", i, p->fs[i].mtone, p->fs[i].moct + 1);
+        }
+}
+
 /* A part's own settings, `|<c>.len=` to `|<c>.voi=`, then 0.9's only when not neutral (a 0.8-sounding part saves as 0.8
  * did; 0.8 ignores them and plays prog, diatonic triads): `.pq=` <src><colour> per slot, `.sl=` the slot locks in hex,
  * `.cs=` the SHAPE values in enum order. 0.17: `.vx=` (after `.voi`) the Chords voicing, only when something is not what `.voi` and a
@@ -3512,14 +3983,14 @@ static void save_part_head(out_t *o, char c, const seq_part_t *p, const prog_vie
     outf(o, "|%c.len=%d|%c.cl=%d|%c.h=%d,%d|%c.prog=", c, p->bars, c, p->chord_len, c, p->harmony, v->hseed, c);
     for (int i = 0; i < n; i++) {
         outf(o, "%d", v->prog[i]);
-        pq |= v->src[i] | v->colour[i];
+        pq |= old_src(v->src[i]) | v->colour[i];
     }
     outf(o, "|%c.voi=%d", c, p->voicing);
     if (p->vstyle != -1 || p->vmode >= VMODE_TOPLINE || p->vcol || p->vinv || p->vspr || p->vstrdir)
         outf(o, "|%c.vx=%d,%d,%d,%d,%d,%d", c, p->vstyle, p->vmode, p->vcol, p->vinv, p->vspr, p->vstrdir);
     if (pq) {
         outf(o, "|%c.pq=", c);
-        for (int i = 0; i < n; i++) outf(o, i ? ",%d%d" : "%d%d", v->src[i], v->colour[i]);
+        for (int i = 0; i < n; i++) outf(o, i ? ",%d%d" : "%d%d", old_src(v->src[i]), v->colour[i]);
     }
     if (sl) outf(o, "|%c.sl=%x", c, sl);
     if (cs) {
@@ -3530,6 +4001,7 @@ static void save_part_head(out_t *o, char c, const seq_part_t *p, const prog_vie
     if (v->rank != n) outf(o, "|%c.rk=%d", c, v->rank);   /* never for a phrase as dealt (a 0.13 project's) */
     out_cp(o, c, p);
     out_hoct(o, c, p);   /* 0.24 */
+    out_feel(o, c, p);   /* 0.28 */
 }
 
 /* 0.11: `|<c>3.mr=` a recipe Melody 1's recipe (its .g says GEN_MEL_HOOK, which 0.10 plays), its phrase the old one
@@ -3585,6 +4057,10 @@ static int save_state(seq_t *s, char *buf, int len) {
     if (s->preset) outf(&o, "|gn=%d", s->preset);   /* 0.23 only when set: a state without a preset saves as 0.22 did */
     int pm = mutes_differ(s);
     if (pm) outf(&o, "|pm=1");   /* 0.26 only then: a state whose parts share the Verse's mutes saves as 0.25 did */
+    if (s->arr.n) {   /* 0.27 the arrangement, only when there is one: follow, then part, passes, mute in 2 hex digits each a row */
+        outf(&o, "|ar=%d,", s->arr.follow);
+        for (int i = 0; i < s->arr.n; i++) outf(&o, "%02x%02x%02x", s->arr.row[i].part, s->arr.row[i].passes, s->arr.row[i].mute);
+    }
     save_part_lanes(&o, s, 'A', &s->part[0], &v, 1);
     if (o.n >= len) {
         s->unsaved_mask = s->used_mask;
@@ -3734,7 +4210,7 @@ static int load_out(int *x, const char *v, int n, int dflt) {
 enum { F_REQUIRED = 5 + SEQ_LANES, F_VOI = F_REQUIRED, F_GV, F_H, F_G, F_LK = F_G + SEQ_LANES, F_CH = F_LK + SEQ_LANES, F_SW, F_GT,
        F_DY, F_PQ, F_SL, F_CS, F_BS, F_AB, F_MR = F_AB + SEQ_LANES, F_CV, F_SCH = F_CV + SEQ_LANES, F_RK, F_MP, F_BV,
        F_FO = F_BV + SEQ_LANES, F_VX, F_RB, F_RZ, F_BRB, F_BRZ, F_BX, F_BL, F_JX, F_JW, F_JK, F_JL, F_JF, F_JY, F_JV, F_JM,
-       F_DJ, F_GN = F_DJ + DL_COUNT, F_CP, F_HO, F_LA, F_PM = F_LA + DL_COUNT, F_COUNT };
+       F_DJ, F_GN = F_DJ + DL_COUNT, F_CP, F_HO, F_LA, F_PM = F_LA + DL_COUNT, F_AR, F_CX, F_VH, F_VR, F_FM, F_BT, F_BF, F_AP, F_MT, F_JP, F_JT, F_JE, F_JC, F_COUNT };
 /* pq, sl, cs: 0.9, bs, ab: 0.10, when not neutral; mr: 0.11, a recipe melody; cv: 0.13, a chord rhythm's variant;
  * .ch (F_SCH): 0.14, every slot of a loop with no period of 16 or less; .rk: 0.14, the COLOUR ranks' period; mp: VST-12, a
  * recipe melody's phrasing; bv: 0.16, a generated lane's bars with their own variation; fo: after 0.16, FOLLOW off; vx: 0.17, the Chords voicing, when not a new part's;
@@ -3744,7 +4220,8 @@ enum { F_REQUIRED = 5 + SEQ_LANES, F_VOI = F_REQUIRED, F_GV, F_H, F_G, F_LK = F_
  * and the locked bars' DENSITY/RANGE/VARIATION/TIME (out_mnew), when not the defaults; 1.dj, 2.dj (F_DJ + DL_*): 0.22, a drawn lane's
  * JAM state (out_djam), once used; gn: 0.23, the genre preset last loaded, when set; cp: 0.24, the change points (out_cp), when any; ho:
  * 0.24, the hit octaves (out_hoct), when any; 1.la, 2.la (F_LA + DL_*): 0.24, a drawn lane's LOCK WITH and ANTICIPATE (out_la), when not
- * the defaults; pm: 0.26, the parts keep their own mutes (else every part takes A's) */
+ * the defaults; pm: 0.26, the parts keep their own mutes (else every part takes A's); ar: 0.27, the arrangement (load_ar); cx, vh, vr, fm: 0.28
+ * Feel (out_feel), when used; bt: the Bass's Feel page's tones (out_feel), bf: a kept bar's, ap: a hit's picks (out_bass), when used */
 typedef struct fields { const char *v[F_COUNT]; int n[F_COUNT]; } fields_t;
 
 static void find_fields(const char *str, char letter, fields_t *f) {
@@ -3754,7 +4231,7 @@ static void find_fields(const char *str, char letter, fields_t *f) {
                                               "1.cv", "2.cv", "3.cv", "4.cv", ".ch", ".rk", "3.mp",
                                               "1.bv", "2.bv", "3.bv", "4.bv", "fo", ".vx", ".rb", ".rz", "2.rb", "2.rz", "2.bx",
                                               "2.bl", "3.jx", "3.jw", "3.jk", "3.jl", "3.jf", "3.jy", "3.jv", "3.jm",
-                                              "1.dj", "2.dj", "gn", ".cp", ".ho", "1.la", "2.la", "pm"};
+                                              "1.dj", "2.dj", "gn", ".cp", ".ho", "1.la", "2.la", "pm", "ar", ".cx", ".vh", ".vr", ".fm", ".bt", "2.bf", "2.ap", ".mt", "3.jp", "3.jt", "3.je", "3.jc"};
     memset(f, 0, sizeof *f);
     for (const char *p = str; *p;) {
         const char *end = strchr(p, '|'), *eq;
@@ -4038,11 +4515,33 @@ static void load_bfix(seq_part_t *p, const char *v, int n) {
     }
 }
 
-/* 0.19 a DRAWN Bass lane's fields (its DLANE load_extra): `2.bx`, `2.bl` and its fixed notes in `2.ab` */
+static int hexn(const char *v, int n);
+
+/* `2.bf=`, after the kept bars they belong to */
+static void load_bf(seq_part_t *p, const char *v, int len) {
+    for (int k = 0; v && k + 18 <= len; k += 18) {
+        const char *e = v + k;
+        int bar = hexn(e, 1), ok = bar >= 0 && bar < p->bars && (p->bass.nlock >> bar & 1);
+        for (int a = 0; ok && a <= SEQ_STEPS; a++) ok = hexn(e + 1 + a, 1) >= 0 && hexn(e + 1 + a, 1) <= TONE_7;
+        for (int a = 0; ok && a <= SEQ_STEPS; a++) p->bass.ftone[bar][a] = (unsigned char)hexn(e + 1 + a, 1);
+    }
+}
+
+/* `2.ap=`: <step hex2><code hex2> pairs, each a hit's pick on a step of the loop; a bad pair is skipped, never refused */
+static void load_ap(seq_part_t *p, const char *v, int n) {
+    for (int i = 0; v && i + 4 <= n; i += 4) {
+        int st = hex2(v + i), code = hex2(v + i + 2);
+        if (st >= 0 && st < p->bars * SEQ_STEPS && bass_is_pick(code)) p->bass.fix[st] = (unsigned char)code;
+    }
+}
+
+/* 0.19 a DRAWN Bass lane's fields (its DLANE load_extra): `2.bx`, `2.bl`, `2.bf`, its fixed notes in `2.ab`, its picks in `2.ap` */
 static void load_bass(seq_part_t *p, const fields_t *f) {
     load_bx(p, f->v[F_BX], f->n[F_BX]);
     load_bl(p, f->v[F_BL], f->n[F_BL]);
+    load_bf(p, f->v[F_BF], f->n[F_BF]);
     load_bfix(p, f->v[F_AB + LANE_BASS], f->n[F_AB + LANE_BASS]);
+    load_ap(p, f->v[F_AP], f->n[F_AP]);
 }
 
 /* `3.mr=`, as out_mel writes it: 15 values in range. On a Melody 1 loaded as GEN_MEL_HOOK (what a 0.11 save writes in
@@ -4141,6 +4640,29 @@ static void load_jf(seq_part_t *p, const char *v, int n) {
     }
 }
 
+/* out_mfeel's fields: a bad entry is skipped, never refused */
+static void load_mfeel(seq_part_t *p, const fields_t *f) {
+    mjam_state_t *m = &p->mjam;
+    const char *v = f->v[F_JP];
+    for (int i = 0; v && i + 4 <= f->n[F_JP]; i += 4) {
+        int st = hex2(v + i), code = hex2(v + i + 2);
+        if (st >= 0 && st < p->bars * SEQ_STEPS && mjam_is_pick(code)) m->fix[st] = (unsigned char)code;
+    }
+    v = f->v[F_JT];
+    for (int i = 0; v && i + 4 <= f->n[F_JT]; i += 4) {
+        int b = hexn(v + i, 1), st = hexn(v + i + 1, 1), code = hex2(v + i + 2);
+        if (b >= 0 && b < p->bars && st >= 0 && code > 0 && (code & 15) >= TONE_R && (code & 15) <= TONE_7 && code >> 4 <= 2) m->fland[b][st] = (unsigned char)code;
+    }
+    v = f->v[F_JE];
+    if (v && f->n[F_JE] == 2 && v[0] >= '0' && v[0] <= '3' && v[1] >= '0' && v[1] <= '4') m->early = (unsigned char)(v[0] - '0'), m->loose = (unsigned char)(v[1] - '0');
+    v = f->v[F_JC];
+    if (v && f->n[F_JC] == 5 && (v[0] == '0' || v[0] == '1')) {
+        int locks = hexn(v + 1, 4);
+        m->set.cadc = (signed char)(v[0] - '0');
+        for (int b = 0; locks > 0 && b < SEQ_MAX_BARS; b++) if (locks >> b & 1) m->frozen[b].cadc = 1;
+    }
+}
+
 /* 0.20 a JAM Melody lane's fields (out_mjam), over mjam_init's state and GATE 50. Absent or bad: that field's default; values clamped */
 static void load_mjam(seq_part_t *p, const fields_t *f) {
     mjam_state_t *m = &p->mjam;
@@ -4160,6 +4682,7 @@ static void load_mjam(seq_part_t *p, const fields_t *f) {
     /* 0.21 Amendment 1: ACCENT stays LIGHT (3.jv's second character is checked, not loaded) */
     if (v && f->n[F_JV] == 2 && b36v(v[0]) >= 0 && b36v(v[1]) >= 0) m->swing = (unsigned char)clampi(b36v(v[0]), 0, 5);
     load_jm(p, f->v[F_JM], f->n[F_JM]);
+    load_mfeel(p, f);
 }
 
 /* 0.24 `.cp=` (out_cp): each entry of 5 characters, in any order; a bad one, or one past a full bar, is skipped (cp_put sorts them;
@@ -4196,6 +4719,74 @@ static void load_hoct(seq_part_t *p, const char *v, int n) {
     }
 }
 
+/* 0.28 `n` hex digits at v, -1 for a bad one */
+static int hexn(const char *v, int n) {
+    int x = 0;
+    for (int i = 0; i < n; i++) {
+        int d = hexv(v[i]);
+        if (d < 0) return -1;
+        x = x * 16 + d;
+    }
+    return x;
+}
+
+/* 0.28 Feel's fields (out_feel), after the slots. Never refused: a bad entry is skipped, a bad field ends there. */
+static void load_cx(seq_part_t *p, const char *v, int len) {
+    for (int k = 0; v && k + 9 <= len; k += 9) {
+        int i = hexn(v + k, 2), sr = hexn(v + k + 2, 2), m = hexn(v + k + 4, 1), b = hexn(v + k + 5, 4);
+        if (i < 0 || i >= p->prog_len || sr < 0 || sr > THEORY_SRC_MAX || m < 0 || m > 1 || b < 0) continue;
+        if (sr > THEORY_NBORROW) p->src[i] = (unsigned char)sr, p->prog[i] = 0;
+        p->fs[i].mute = (unsigned char)m, p->fs[i].base = (unsigned short)b;
+    }
+}
+
+static void load_vh(seq_part_t *p, const char *v, int len) {
+    for (int k = 0; v && k + 5 <= len; k++) {   /* k: past each entry's comma */
+        int i = hexn(v + k, 2), run = hexn(v + k + 2, 2), n = hexn(v + k + 4, 1);
+        if (i < 0 || run < 1 || n < 1 || n > THEORY_CHORD_MAX || k + 5 + 2 * n > len) break;
+        for (int j = i; j < i + run && j < p->prog_len; j++) {
+            p->fs[j].hand_n = (signed char)n;
+            for (int q = 0; q < n; q++) p->fs[j].hand[q] = (signed char)(hexn(v + k + 5 + 2 * q, 2) & 127);
+        }
+        k += 5 + 2 * n;
+    }
+}
+
+static void load_vr(seq_part_t *p, const char *v, int len) {
+    int n = v && len >= 1 ? hexn(v, 1) : -1;
+    if (n < 1 || n > THEORY_CHORD_MAX || len != 1 + 3 * n) return;
+    p->rc.n = (signed char)n;
+    for (int k = 0; k < n; k++) {
+        int role = hexn(v + 1 + 3 * k, 1) & 7;
+        p->rc.role[k] = (unsigned char)(role < TONE_R ? TONE_R : role);
+        p->rc.note[k] = (signed char)(hexn(v + 2 + 3 * k, 2) & 127);
+    }
+}
+
+static void load_bt(seq_part_t *p, const char *v, int len) {
+    for (int k = 0; v && k + 3 <= len; k += 3) {
+        int i = hexn(v + k, 2), tone = hexn(v + k + 2, 1);
+        if (i >= 0 && i < p->prog_len && tone > TONE_R && tone <= TONE_7) p->fs[i].tone = (unsigned char)tone;
+    }
+}
+
+static void load_mt(seq_part_t *p, const char *v, int len) {
+    for (int k = 0; v && k + 4 <= len; k += 4) {
+        int i = hexn(v + k, 2), tone = hexn(v + k + 2, 1), oct = hexn(v + k + 3, 1);
+        if (i >= 0 && i < p->prog_len && tone >= TONE_R && tone <= TONE_7 && oct >= 0 && oct <= 2) p->fs[i].mtone = (unsigned char)tone, p->fs[i].moct = (signed char)(oct - 1);
+    }
+}
+
+static void load_feel(seq_part_t *p, const fields_t *f) {
+    p->feel_spans = f->v[F_FM] != NULL;
+    load_bt(p, f->v[F_BT], f->n[F_BT]);
+    load_mt(p, f->v[F_MT], f->n[F_MT]);
+    load_cx(p, f->v[F_CX], f->n[F_CX]);
+    load_vh(p, f->v[F_VH], f->n[F_VH]);
+    load_vr(p, f->v[F_VR], f->n[F_VR]);
+    for (int i = 0; i < p->prog_len; i++) p->fs[i].pick = (unsigned short)feel_code(p, i);
+}
+
 /* A part's fields (letter A-F), into p; 0 if one is missing or bad (0.9's optional fields are never refused) */
 static int parse_part(const fields_t *f, seq_part_t *p) {
     for (int i = 2; i < F_REQUIRED; i++)
@@ -4219,6 +4810,7 @@ static int parse_part(const fields_t *f, seq_part_t *p) {
     if (p->chord_len != 4 && p->chord_len != 8 && p->chord_len != 16 && p->chord_len != 32) return 0;
     p->rank_len = f->v[F_RK] ? num(f->v[F_RK], f->n[F_RK]) : 0;   /* bad or absent: the phrase's (settle_slots) */
     load_slots(p, f->v[F_SCH], f->n[F_SCH]);
+    load_feel(p, f);   /* 0.28 */
     load_cp(p, f->v[F_CP], f->n[F_CP]);   /* 0.24 */
     load_hoct(p, f->v[F_HO], f->n[F_HO]);
     for (int l = 0; l < SEQ_LANES; l++)
@@ -4244,8 +4836,25 @@ static int parse_part(const fields_t *f, seq_part_t *p) {
     return 1;
 }
 
+/* 0.27 `ar=<follow>,<rows>`, each row part, passes, mute in 2 hex digits: absent or malformed is no song (never refuses a load);
+ * the rows' lengths are checked once the parts are loaded (state_load) */
+static void load_ar(seq_arr_t *a, const char *v, int n) {
+    arr_clear(a);
+    if (!v || n < 8 || (v[0] != '0' && v[0] != '1') || v[1] != ',' || (n - 2) % 6 || (n - 2) / 6 > SEQ_ARR_MAX) return;
+    for (int i = 0; i < (n - 2) / 6; i++) {
+        int part = hex2(v + 2 + 6 * i), passes = hex2(v + 4 + 6 * i), mute = hex2(v + 6 + 6 * i);
+        if (part < 0 || part >= SEQ_NPARTS || passes < 1 || passes > 16 || mute < 0 || mute >> SEQ_ACTIVE_LANES) {
+            arr_clear(a);
+            return;
+        }
+        a->row[i] = (seq_arr_row_t){(unsigned char)part, (unsigned char)passes, (unsigned char)mute};
+    }
+    a->n = (n - 2) / 6;
+    a->follow = v[0] == '1';
+}
+
 /* The project's fields and part A */
-static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, seq_part_t *p) {
+static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, seq_part_t *p, seq_arr_t *ar) {
     int gn;
     fields_t f;
     find_fields(str, 'A', &f);
@@ -4262,6 +4871,7 @@ static int parse_v2(const char *str, int *key, int *scale, int *ch, int *out, se
     gn = f.v[F_GN] ? num(f.v[F_GN], f.n[F_GN]) : 0;
     out[4] = gn > 0 && gn <= SEQ_PRESETS_MAX ? gn : 0;   /* 0.23 the preset: absent or bad is none; never refuses a load */
     out[5] = f.v[F_PM] && f.n[F_PM] == 1 && f.v[F_PM][0] == '1';   /* 0.26 per-part mutes: only `pm=1`; never refuses a load */
+    load_ar(ar, f.v[F_AR], f.n[F_AR]);
     return parse_part(&f, p);
 }
 
@@ -4442,20 +5052,65 @@ static void load_other_part(seq_t *s, const char *str, int part) {
 }
 
 /* song (0.23 seq_song_load): a csq2 state's song only, the MIDI channels and FOLLOW kept */
+static void ready_part(seq_t *s, int part);
+static int arr_ok(const seq_t *s, const seq_arr_row_t *r, int n);
+static int arr_bars(const seq_t *s, int part);
+static void arr_mutes(seq_t *s, int m);
+static void arr_start(seq_t *s, int row, long k);
+
+/* 0.27 every row at most 64 bars of its part's own length (a part made longer: fewer passes) */
+static void arr_clamp(seq_t *s) {
+    for (int i = 0; i < s->arr.n; i++) {
+        seq_arr_row_t *r = &s->arr.row[i];
+        int most = 64 / arr_bars(s, r->part);
+        if (r->passes > most) r->passes = (unsigned char)(most < 1 ? 1 : most);
+    }
+}
+
+/* 0.27 a song load (a genre or pack preset) under a song: the rows stay (the arrangement is the user's), their parts readied from
+ * what the load brought (a part it lacks: a copy of its Verse), the row the first of the part now playing */
+static void arr_kept(seq_t *s) {
+    seq_arr_t *a = &s->arr;
+    arr_clamp(s);
+    for (int i = 0; i < a->n; i++) ready_part(s, a->row[i].part);
+    a->cur = -1;
+    for (int i = 0; i < a->n && a->cur < 0; i++)
+        if (a->row[i].part == s->cur_part) a->cur = i;
+    a->pass = 0;
+    a->jump = a->edit = a->next_row = -1;
+    if (a->cur >= 0) arr_mutes(s, a->row[a->cur].mute);
+}
+
+/* 0.27 a loaded state's arrangement (a row too long for its loaded part: fewer passes): it starts at row 0, its part playing with
+ * the row's mutes */
+static void arr_loaded(seq_t *s, const seq_arr_t *ar) {
+    s->arr = *ar;
+    arr_clamp(s);
+    if (!arr_ok(s, s->arr.row, s->arr.n)) arr_clear(&s->arr);
+    if (!s->arr.n) return;
+    for (int i = 0; i < s->arr.n; i++) ready_part(s, s->arr.row[i].part);
+    s->arr.cur = 0;
+    s->cur_part = s->arr.row[0].part;
+    for (int l = 0; l < SEQ_ACTIVE_LANES; l++) cur(s)->lane[l].mute = s->arr.row[0].mute >> l & 1;
+    if (s->view_bar >= cur(s)->bars) s->view_bar = 0;
+}
+
 static int state_load(seq_t *s, const char *str, int song) {
     int key, scale, ch[3], out[6];   /* out: SWING, GATE, DYNAMICS, FOLLOW, 0.23 the preset, 0.26 per-part mutes */
+    seq_arr_t ar;                    /* 0.27 the arrangement: a song load (a preset) keeps the playing one */
     if (!str) return 0;
     if (!strncmp(str, "csq1:", 5)) {
         if (!load_v1(s, str)) return 0;
         act(s);
         s->follow = 1;   /* a v1 state has no `fo`: FOLLOW on */
         s->preset = 0;   /* 0.23 nor a preset */
+        arr_clear(&s->arr);   /* 0.27 nor a song */
         s->naud = 0;     /* as ALL NOTES OFF: the loaded song starts clean */
         strip_clamp(s);
         s->display_rev++;   /* MPC re-reads the loaded values */
         return 1;
     }
-    if (strncmp(str, "csq2|", 5) || !parse_v2(str + 5, &key, &scale, ch, out, &s->load_tmp)) return 0;
+    if (strncmp(str, "csq2|", 5) || !parse_v2(str + 5, &key, &scale, ch, out, &s->load_tmp, &ar)) return 0;
     txn_cancel(s);
     paging_off(s);
     act(s);
@@ -4478,6 +5133,8 @@ static int state_load(seq_t *s, const char *str, int song) {
     for (int p = 1; p < SEQ_NPARTS; p++) load_other_part(s, str + 5, p);
     for (int p = 1; !out[5] && p < SEQ_NPARTS; p++)   /* 0.26 a state without `pm`: A's mutes were every part's */
         for (int l = 0; l < SEQ_LANES; l++) s->part[p].lane[l].mute = s->part[0].lane[l].mute;
+    if (!song) arr_loaded(s, &ar);
+    else if (s->arr.n) arr_kept(s);
     s->undo_n = 0;
     strip_clamp(s);
     s->display_rev++;
@@ -4526,6 +5183,7 @@ void seq_init_preset(seq_t *s) {
     txn_cancel(s);
     paging_off(s);
     act(s);
+    arr_clear(&s->arr);   /* 0.27 INIT: no song */
     s->naud = 0;
     release_all(s);
     memset(&s->keys, 0, sizeof s->keys);
@@ -4585,6 +5243,9 @@ static void push_snap_part(seq_t *s, int part, int lane, int join) {
     memcpy(u->colour, p->colour, sizeof u->colour);
     u->slot_lock = p->slot_lock;
     memcpy(u->cp, p->cp, sizeof u->cp);   /* 0.24 */
+    memcpy(u->fs, p->fs, sizeof u->fs);   /* 0.28 */
+    u->rc = p->rc;
+    u->feel_spans = p->feel_spans;
     u->chord_len = p->chord_len;
     u->filled_slots = p->filled_slots;
     u->phrase = p->phrase;
@@ -5016,12 +5677,13 @@ static void restore_lane(seq_t *s, seq_part_t *p, const seq_snap_t *u) {
     if (d >= 0) memcpy(p->hoct, u->hoct, sizeof p->hoct);   /* 0.24 (final review: either drawn lane's step, as push_snap_part) */
     if (u->lane == LANE_BASS) bass_back(&p->bass, &u->bass, u->bkeep);   /* 0.19: the note settings only from bkeep */
     if (u->lane == LANE_MEL_UP && u->ln.gen.style != GEN_MEL_JAM) p->mjam = u->mjam;   /* 0.20: a JAM conversion's (mel_jam_now): all of it */
+    else if (u->lane == LANE_MEL_UP && u->knobs == 2) p->mjam = u->mjam;               /* a page's word (seq_mel_row): the settings too */
     else if (u->lane == LANE_MEL_UP) mjam_back(&p->mjam, &u->mjam);                    /* 0.20: not the settings (knob turns) */
     if (u->lane == LANE_MEL_UP) {   /* the recipe; its knobs, like the complexity, only from a recipe snapshot */
         unsigned char kn[MK_COUNT];
         memcpy(kn, p->mel.kn, sizeof kn);
         p->mel = u->mel;
-        if (!u->recipe) memcpy(p->mel.kn, kn, sizeof kn);
+        if (!u->recipe && u->knobs != 2) memcpy(p->mel.kn, kn, sizeof kn);
     }
     if (u->knobs)   /* 0.17.1 RESET KNOBS: the complexity (as the snapshot's lane) and the whole SHAPE row come back */
         memcpy(p->lane_shape[u->lane], u->shape, sizeof u->shape);
@@ -5050,6 +5712,9 @@ static void restore_prog(seq_t *s, seq_part_t *p, const seq_snap_t *u) {
     memcpy(p->src, u->src, sizeof u->src);
     memcpy(p->colour, u->colour, sizeof u->colour);
     memcpy(p->cp, u->cp, sizeof p->cp);
+    memcpy(p->fs, u->fs, sizeof p->fs);   /* 0.28 */
+    p->rc = u->rc;
+    p->feel_spans = u->feel_spans;
     p->slot_lock = u->slot_lock;
     p->chord_len = u->chord_len;
     p->filled_slots = u->filled_slots;
@@ -5091,8 +5756,11 @@ void seq_undo(seq_t *s) {
         u = &s->undo[s->undo_top];
         seq_part_t *p = &s->part[u->part];
         if (u->lane >= 0) {
+            int bars = u->prog_too == 2 && u->bars != p->bars;   /* Go back on Chords: the loop's length too */
+            if (bars) bars_set(s, p, u->bars);
             restore_lane(s, p, u);
             if (u->prog_too) restore_prog(s, p, u);   /* 0.24 a PHRASE edit's slots, picks and points */
+            if (bars) regen_part(s, p), arr_clamp(s);
             continue;
         }
         restore_prog(s, p, u);
@@ -5161,6 +5829,419 @@ void seq_toggle_slot_lock(seq_t *s, int slot) {
     if (slot_locked(p, slot)) p->colour[slot] = (unsigned char)lock_colour(s, p, slot, p->prog[slot], p->src[slot], colour);
     revoice(s, p);   /* 0.14: a lock that breaks the loop's phrase (or restores it) changes the phrase */
     if (p->phrase != phrase || p->colour[slot] != colour) regen_harmony(s, p);   /* the smooth voicing's chain follows the phrase (the ranks stay) */
+}
+
+/* ---- 0.28 Feel: the chords as runs, and the page's verbs (seq_core.h) */
+static int vknob_range(int what, int *lo, int *hi);
+static int voicing_edited(const seq_t *s);
+static int voicing_apply(seq_t *s, int i);
+typedef struct { int start, steps, deg, src, colour, lock; seq_feel_slot_t f; } feel_run_t;
+
+static void feel_decode(unsigned code, int *deg, int *src, int *colour) {
+    unsigned c = code - 1;
+    *deg = (int)(c % 7), c /= 7;
+    *src = (int)(c % (THEORY_SRC_MAX + 1)), *colour = (int)(c / (THEORY_SRC_MAX + 1));
+}
+
+/* The playing loop as runs (seq_core.h), in r (SEQ_MAX_BARS x SEQ_STEPS at most); returns the count */
+static int feel_runs(const seq_part_t *p, feel_run_t *r) {
+    int n = 0, total = p->bars * SEQ_STEPS;
+    static const seq_feel_slot_t NONE;
+    for (int t = 0; t < total; t++) {
+        int sl = slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS);
+        const seq_feel_slot_t *f = sl < SEQ_MAX_PROG ? &p->fs[sl] : &NONE;
+        feel_run_t *l = n ? &r[n - 1] : NULL;
+        if (l && l->deg == p->prog[sl] && l->src == p->src[sl] && l->colour == p->colour[sl] && feel_slot_same(&l->f, f)) {
+            l->steps++;
+            continue;
+        }
+        r[n] = (feel_run_t){t, 1, p->prog[sl], p->src[sl], p->colour[sl], sl < SEQ_MAX_PROG ? slot_locked(p, sl) : 1, *f};
+        n++;
+    }
+    return n;
+}
+
+/* Runs on the quarter note, in order, by the rule in seq_core.h. More runs than quarters: the shortest off the beat goes, its time to the one
+ * before (the runs on the beat fit, so one is off it). Then, from the end, each takes its nearest quarter, before the next run and after the
+ * room the runs before it need. Returns the count */
+static int feel_snap(feel_run_t *r, int n, int total) {
+    while (n * 4 > total) {
+        int cut = 0, shortest = total + 1;
+        for (int i = 0; i < n; i++) {
+            int len = (i + 1 < n ? r[i + 1].start : total) - r[i].start;
+            if (r[i].start % 4 && len < shortest) cut = i, shortest = len;
+        }
+        memmove(&r[cut], &r[cut + 1], sizeof r[0] * (size_t)(n - cut - 1));
+        n--;
+    }
+    for (int i = n - 1, next = total; i >= 0; i--) {
+        int st = (r[i].start + 2) / 4 * 4;
+        if (st > next - 4) st = next - 4;
+        if (st < i * 4) st = i * 4;
+        r[i].start = st;
+        r[i].steps = next - st;
+        next = st;
+    }
+    return n;
+}
+
+/* Run x's chord into slot sl */
+static void feel_slot(seq_part_t *p, int sl, const feel_run_t *x) {
+    p->prog[sl] = x->deg;
+    p->src[sl] = (unsigned char)x->src;
+    p->colour[sl] = (unsigned char)x->colour;
+    p->fs[sl] = x->f;
+    p->fs[sl].pick = (unsigned short)feel_code(p, sl);
+    p->slot_lock = (p->slot_lock & ~SLOT_BIT(sl)) | (uint64_t)(x->lock != 0) << sl;
+}
+
+/* The runs as the part's slots (n > 0, in time order, filling the loop from step 0): one verb's end */
+static void feel_store(seq_t *s, seq_part_t *p, feel_run_t *r, int n) {
+    int total = p->bars * SEQ_STEPS, old = p->chord_len, cl = old > SEQ_STEPS ? old : SEQ_STEPS;   /* back to a bar when the chords allow it */
+    n = feel_snap(r, n, total);
+    for (int i = 0; i < n; i++)
+        while (r[i].start % cl) cl /= 2;
+    p->feel_spans = cl < SEQ_STEPS;
+    chord_len_to(s, p, cl);
+    cp_init(p);
+    settle_slots(p);
+    for (int i = 0; i < n; i++)
+        for (int t = r[i].start; t < r[i].start + r[i].steps; t += cl) feel_slot(p, t / cl, &r[i]);
+    p->phrase = 0;   /* settle_slots works it out again */
+    revoice(s, p);
+    if (cl != old) regen_part(s, p);
+    else regen_harmony(s, p);
+}
+
+/* A verb that moves no time on a loop with change points: run x's chord written where it plays, slots and points alike, so the points stay
+ * where Tweak put them (the point that now plays what plays before it goes). 0, nothing changed, with no point (feel_store does as it always
+ * did) or when a point would have to hold what only a slot can: a mute, hand notes, a colour no point type is */
+static int feel_put(seq_t *s, seq_part_t *p, const feel_run_t *x) {
+    int any = 0, type = -1, end = x->start + x->steps;
+    for (int b = 0; b < p->bars; b++) any |= p->cp[b][0].step >= 0;
+    for (int k = 0; k < CP_TYPES; k++)
+        if (PICK_TYPE[k] == x->colour) type = k;
+    for (int t = x->start; any && t < end; t++)
+        if (slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS) >= SEQ_MAX_PROG && (x->f.mute || x->f.hand_n || type < 0)) any = 0;
+    if (!any) return 0;
+    for (int t = x->start; t < end; t++) {
+        int sl = slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS), v = sl - SEQ_MAX_PROG;
+        if (v < 0) {
+            feel_slot(p, sl, x);
+        } else {
+            seq_cp_t *c = &p->cp[v / SEQ_CP_MAX][v % SEQ_CP_MAX];
+            c->deg = (signed char)x->deg, c->src = (signed char)x->src, c->type = (signed char)type;
+        }
+    }
+    p->phrase = 0;
+    revoice(s, p);
+    cp_prune(s, p);
+    regen_harmony(s, p);
+    return 1;
+}
+
+static void feel_begin_lane(seq_t *s, int lane) {
+    seq_txn_done(s);
+    act(s);
+    push_undo(s, lane);
+}
+
+static void feel_begin(seq_t *s) { feel_begin_lane(s, -1); }
+
+static int feel_chord_ok(int deg, int src, int colour) {
+    return src >= 0 && src <= THEORY_SRC_MAX && colour >= 0 && colour < COL_COUNT && (src || (deg >= 0 && deg <= 6));
+}
+
+/* How far resize moves chord i's end, dir +1 or -1: half a bar where both can spare it, else a quarter; 0 when it cannot */
+static int feel_resize_by(const feel_run_t *r, int n, int i, int dir) {
+    int j = (i + 1) % n, st;
+    if (n < 2 || (dir != 1 && dir != -1)) return 0;
+    st = r[i].steps >= 8 && (dir < 0 ? r[i].steps > 8 : r[j].steps > 8) ? 8 : 4;
+    return (dir > 0 ? r[j].steps : r[i].steps) > st ? st : 0;
+}
+
+/* How far align moves chord i's start to reach a bar line: back when the chord before can spare it, else on; 0 when it starts on one or neither can */
+static int feel_align_by(const feel_run_t *r, int i) {
+    int off = r[i].start % SEQ_STEPS;
+    if (!i || !off) return 0;
+    return r[i - 1].steps > off ? -off : r[i].steps > SEQ_STEPS - off ? SEQ_STEPS - off : 0;
+}
+
+int seq_feel_chords(const seq_t *s, seq_feel_chord_t *out, int max) {
+    const seq_part_t *p = ccur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r);
+    for (int i = 0; i < n && i < max; i++) {
+        seq_feel_chord_t *o = &out[i];
+        int t = r[i].start;
+        unsigned char codes[16];
+        *o = (seq_feel_chord_t){slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS), t, r[i].steps, r[i].deg, r[i].src, r[i].colour, r[i].f.mute, r[i].f.hand_n,
+                                0, 0, 0, r[i].f.base != 0, feel_resize_by(r, n, i, 1) != 0, feel_resize_by(r, n, i, -1) != 0, feel_align_by(r, i) != 0, 0, 0, r[i].f.tone, r[i].f.mtone, r[i].f.moct};
+        for (int k = t; k < t + r[i].steps; k++)
+            o->hits += p->lane[LANE_CHORDS].steps[k].on || (p->sflag[DL_CHORDS][k] & SF_TIED);
+        drawn_codes(p, DL_CHORDS, t / SEQ_STEPS, codes);
+        o->can_hit = !rhythm_is_hit(codes[t % SEQ_STEPS]);
+        if (r[i].f.base) {
+            feel_decode(r[i].f.base, &o->base_deg, &o->base_src, &o->base_colour);
+            if (o->base_src) o->base_deg = theory_borrow_degree(s->scale, o->base_src);
+        }
+    }
+    return n < max ? n : max;
+}
+
+void seq_feel_pick(seq_t *s, int i, int deg, int src, int colour) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r);
+    unsigned code;
+    if (i < 0 || i >= n || !feel_chord_ok(deg, src, colour)) return;
+    if (src) deg = theory_borrow_degree(s->scale, src);
+    code = feel_code_of(deg, src, colour);
+    if (r[i].deg == deg && r[i].src == src && r[i].colour == colour) return;
+    feel_begin(s);
+    if (!r[i].f.base) r[i].f.base = (unsigned short)feel_code_of(r[i].deg, r[i].src, r[i].colour);
+    if (r[i].f.base == code) r[i].f.base = 0;   /* back as it was written */
+    r[i].deg = deg, r[i].src = src, r[i].colour = colour, r[i].lock = 0;
+    r[i].f.hand_n = 0;
+    if (!feel_put(s, p, &r[i])) feel_store(s, p, r, n);
+}
+
+void seq_feel_add(seq_t *s, int i, int deg, int src, int colour) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r), half;
+    if (i < 0 || i >= n || !feel_chord_ok(deg, src, colour) || r[i].steps < 8 || n >= SEQ_MAX_PROG) return;
+    if (src) deg = theory_borrow_degree(s->scale, src);
+    feel_begin(s);
+    half = r[i].steps / 8 * 4;   /* in quarters; the odd one stays with the chord */
+    memmove(&r[i + 2], &r[i + 1], sizeof r[0] * (size_t)(n - i - 1));
+    r[i + 1] = (feel_run_t){r[i].start + r[i].steps - half, half, deg, src, colour, 0, {0}};
+    feel_store(s, p, r, n + 1);
+}
+
+void seq_feel_remove(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r);
+    if (i < 0 || i >= n || n < 2) return;
+    feel_begin(s);
+    if (!i) r[1].start = 0;
+    memmove(&r[i], &r[i + 1], sizeof r[0] * (size_t)(n - i - 1));
+    feel_store(s, p, r, n - 1);
+}
+
+void seq_feel_resize(seq_t *s, int i, int dir) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r), st = i >= 0 && i < n ? feel_resize_by(r, n, i, dir) : 0;
+    if (!st) return;
+    feel_begin(s);
+    if (i + 1 < n) {
+        r[i + 1].start += dir * st;
+    } else {   /* the last chord takes from the first: every start between moves */
+        for (int k = 1; k < n; k++) r[k].start -= dir * st;
+    }
+    feel_store(s, p, r, n);
+}
+
+void seq_feel_mute(seq_t *s, int i, int on) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r);
+    if (i < 0 || i >= n || r[i].f.mute == (on != 0)) return;
+    feel_begin(s);
+    r[i].f.mute = on != 0;
+    if (!feel_put(s, p, &r[i])) feel_store(s, p, r, n);
+}
+
+void seq_feel_hit(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r), st, b, end;
+    unsigned char c[16];
+    rbar_t *rb;
+    if (i < 0 || i >= n) return;
+    b = r[i].start / SEQ_STEPS, st = r[i].start % SEQ_STEPS, end = st + r[i].steps;
+    rb = &p->rb[DL_CHORDS][b];
+    drawn_codes(p, DL_CHORDS, b, c);
+    if (rhythm_is_hit(c[st])) return;
+    feel_begin_lane(s, LANE_CHORDS);   /* the lane's bars, unlike the chord verbs */
+    memcpy(rb->c, c, 16);
+    rb->c[st] = RC_HIT;
+    for (int k = st + 1; k < end && k < SEQ_STEPS && rb->c[k] == RC_REST; k++) rb->c[k] = RC_HOLD;   /* it rings to the chord's end or the next hit */
+    rb->ed = 1;
+    render_one(s, p, LANE_CHORDS, b);
+}
+
+int seq_feel_align(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r), by = i >= 0 && i < n ? feel_align_by(r, i) : 0;
+    if (!by) return 0;
+    feel_begin(s);
+    r[i].start += by;
+    feel_store(s, p, r, n);
+    return 1;
+}
+
+static void feel_set_hand(feel_run_t *x, int n, const int *notes) {
+    x->f.hand_n = (signed char)n;
+    memset(x->f.hand, 0, sizeof x->f.hand);
+    for (int k = 0; k < n; k++) x->f.hand[k] = (signed char)notes[k];
+}
+
+void seq_feel_hand(seq_t *s, int i, int n, const int *notes) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int c = feel_runs(p, r), v[THEORY_CHORD_MAX];
+    if (i < 0 || i >= c || n < 0 || n > THEORY_CHORD_MAX) return;
+    for (int k = 0; k < n; k++) {
+        if (notes[k] < 1 || notes[k] > 127) return;
+        v[k] = notes[k];
+    }
+    sort_ints(v, n);
+    feel_begin(s);
+    feel_set_hand(&r[i], n, v);
+    if (!feel_put(s, p, &r[i])) feel_store(s, p, r, c);
+}
+
+/* The notes of a chord on its first step, as they play */
+static int feel_notes_of(const seq_t *s, const seq_part_t *p, const feel_run_t *x, int out[THEORY_CHORD_MAX]) {
+    return chord_notes(s, p, slot_at(p, x->start / SEQ_STEPS, x->start % SEQ_STEPS), -1, LANE_OCT[LANE_CHORDS], out);
+}
+
+void seq_feel_smooth(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r), a[THEORY_CHORD_MAX], b[THEORY_CHORD_MAX], out[THEORY_CHORD_MAX], na, nb, j;
+    if (i < 0 || i >= n || n < 2) return;
+    j = (i + 1) % n;
+    na = feel_notes_of(s, p, &r[i], a);
+    nb = feel_notes_of(s, p, &r[j], b);
+    nb = theory_voice_chord(b, nb, a, na, out);
+    feel_begin(s);
+    feel_set_hand(&r[j], nb, out);
+    if (!feel_put(s, p, &r[j])) feel_store(s, p, r, n);
+}
+
+void seq_feel_recipe(seq_t *s, int n, const int *roles, const int *notes, int undo) {
+    seq_part_t *p = cur(s);
+    if (n < 0 || n > THEORY_CHORD_MAX) return;
+    for (int k = 0; k < n; k++)
+        if (roles[k] < TONE_R || roles[k] > TONE_7 || notes[k] < 1 || notes[k] > 127) return;
+    if (undo) feel_begin(s);
+    feel_hands_clear(p);
+    p->rc.n = (signed char)n;
+    for (int k = 0; k < n; k++) p->rc.role[k] = (unsigned char)roles[k], p->rc.note[k] = (signed char)notes[k];
+    revoice(s, p);
+}
+
+int seq_feel_recipe_n(const seq_t *s) { return ccur(s)->rc.n; }
+
+int seq_feel_shape_get(const seq_t *s, int what) {
+    return what == FS_MODE ? ccur(s)->vmode : what == FS_OCT ? seq_chord_shape(s, SHAPE_OCT) : seq_vknob(s, what - FS_COL);   /* FS_COL.. run as VK_* */
+}
+
+void seq_feel_shape(seq_t *s, int what, int v) {
+    if (what < 0 || what >= FS_COUNT || v == seq_feel_shape_get(s, what)) return;
+    if (what == FS_OCT) { seq_set_chord_octave(s, v); return; }   /* its own undo step */
+    seq_txn_done(s);
+    act(s);
+    push_voicing_snap(s);
+    if (what == FS_MODE) seq_set_vmode(s, v);
+    else seq_set_vknob(s, what - FS_COL, v);
+}
+
+void seq_feel_voicing(seq_t *s, int mode, int col, int inv, int spr, int str, int oct) {
+    seq_part_t *p = cur(s);
+    int lo, hi;
+    if (mode < 0 || mode >= VMODE_COUNT || oct < -1 || oct > 1) return;
+    if (!vknob_range(VK_COL, &lo, &hi) || col < lo || col > hi || !vknob_range(VK_INV, &lo, &hi) || inv < lo || inv > hi ||
+        !vknob_range(VK_SPR, &lo, &hi) || spr < lo || spr > hi || !vknob_range(VK_STR, &lo, &hi) || str < lo || str > hi)
+        return;
+    seq_txn_done(s);
+    act(s);
+    push_voicing_snap(s);
+    part_vox(p, mode, col, inv, spr, str, oct);
+    p->vstyle = -1;
+    feel_hands_clear(p);
+    colour_changed(s, p);
+}
+
+/* Preset i into part p at a bar a chord, no change points (the caller revoices and renders) */
+static void feel_preset_set(seq_t *s, seq_part_t *p, int i) {
+    cp_init(p);
+    p->feel_spans = 0;
+    chord_len_to(s, p, SEQ_STEPS);
+    prog_preset_apply(p, i);
+}
+
+/* Preset i into the playing part at a bar a chord, no change points: the verbs' common end */
+static void feel_preset_apply(seq_t *s, seq_part_t *p, int i) {
+    int old = p->chord_len;
+    feel_preset_set(s, p, i);
+    revoice(s, p);
+    if (old != SEQ_STEPS) regen_part(s, p);
+    else regen_harmony(s, p);
+}
+
+void seq_feel_preset(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    if (i < 0 || i >= THEORY_NPRESETS) return;
+    for (int b = p->bars; b < THEORY_PRESETS[i].len && b < SEQ_MAX_BARS; b = p->bars) seq_set_bars(s, b * 2);   /* the whole progression, a bar a chord */
+    feel_begin(s);
+    feel_preset_apply(s, p, i);
+}
+
+void seq_feel_browse_preset(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    int own;
+    if (i < 0 || i >= THEORY_NPRESETS) return;
+    own = seq_prog_preset(s) < 0;   /* chords of your own go: undoable, as seq_set_prog_preset */
+    for (int b = 0; !own && b < p->bars; b++) own = p->cp[b][0].step >= 0;
+    for (int k = 0; !own && k < p->prog_len; k++) own = p->fs[k].mute || p->fs[k].base;
+    if (own) feel_begin(s);
+    else seq_txn_done(s), act(s);
+    feel_preset_apply(s, p, i);
+}
+
+void seq_feel_browse_style(seq_t *s, int i) {
+    if (i < 0 || i >= VOICING_NSTYLES || (cur(s)->vstyle == i && !voicing_edited(s))) return;
+    seq_txn_done(s);
+    if (feel_has_hands(ccur(s))) push_voicing_snap(s);
+    voicing_apply(s, i);
+}
+
+void seq_feel_audition(seq_t *s, int i) {
+    seq_feel_chord_t c[SEQ_MAX_PROG];
+    if (i >= 0 && i < seq_feel_chords(s, c, SEQ_MAX_PROG) && !c[i].mute) seq_audition_chord(s, c[i].slot);
+}
+
+int seq_feel_preview(const seq_t *s, int slot, int spr, int out[THEORY_CHORD_MAX]) {
+    const seq_part_t *p = ccur(s);
+    return slot_read_ok(p, slot) ? spread_notes(s, p, slot, LANE_OCT[LANE_CHORDS], p->vinv, spr, out) : 0;
+}
+
+#define HASH_MIX(ptr, bytes) do { const unsigned char *b_ = (const unsigned char *)(ptr); for (size_t k_ = 0; k_ < (size_t)(bytes); k_++) h = (h ^ b_[k_]) * 16777619u; } while (0)
+unsigned seq_feel_hash(const seq_t *s) {
+    const seq_part_t *p = ccur(s);
+    unsigned h = 2166136261u;
+    int head[] = {s->cur_part, s->key, s->scale, p->bars, p->chord_len, p->prog_len, p->vstyle, p->vmode, p->vcol, p->vinv, p->vspr, p->vstrdir,
+                  p->lane_shape[LANE_CHORDS][SHAPE_STRUM], p->lane_shape[LANE_CHORDS][SHAPE_OCT]};
+    HASH_MIX(head, sizeof head);
+    HASH_MIX(p->prog, sizeof p->prog);
+    HASH_MIX(p->src, sizeof p->src);
+    HASH_MIX(p->colour, sizeof p->colour);
+    HASH_MIX(p->cp, sizeof p->cp);
+    HASH_MIX(p->fs, sizeof p->fs);
+    HASH_MIX(&p->rc, sizeof p->rc);
+    HASH_MIX(p->voice, sizeof p->voice);
+    HASH_MIX(p->voice_n, sizeof p->voice_n);
+    for (int t = 0; t < p->bars * SEQ_STEPS; t++) {   /* seq_feel_chord_t.hits' inputs alone: a paint that changes no hit reads nothing again */
+        unsigned char sounds = p->lane[LANE_CHORDS].steps[t].on || (p->sflag[DL_CHORDS][t] & SF_TIED);
+        HASH_MIX(&sounds, 1);
+    }
+    return h;
 }
 
 /* 0.24 the getters read a live change point's virtual slot too (slot_read_ok), the setters above never */
@@ -5280,14 +6361,14 @@ int seq_rknob_eff(const seq_t *s, int lane, int what) {
 int seq_vmode_eff(const seq_t *s) { return eff_vmode(ccur(s)); }
 
 /* The chords' colours changed: the voices and labels, and the lanes that read the colours (a shaped Bass, a recipe melody; 0.24.2 a drawn
- * lane with ANTICIPATE on: a colour can make or remove a chord change, chord_change_at) */
+ * lane with ANTICIPATE on, or 0.28.1 Chords with Feel's chords, feel_strike: a colour can make or remove a chord change, chord_change_at) */
 static void colour_changed(seq_t *s, seq_part_t *p) {
     int shaped = p->lane[LANE_BASS].gen.style != GEN_MANUAL && bass_shaped(p);
     revoice(s, p);
     if (shaped) regen_lane(s, p, LANE_BASS);   /* a shaped Bass reads the chords' colours (the generator does not) */
     if (is_recipe(p, LANE_MEL_UP)) regen_lane(s, p, LANE_MEL_UP);   /* so does a recipe melody (absolute notes) */
     for (int d = 0; d < DL_COUNT; d++)
-        if (p->an[d] && lane_drawn(p, DLANE[d].lane) && !(d == DL_BASS && shaped)) render_mask(s, p, DLANE[d].lane, (1u << p->filled) - 1, 0);
+        if ((p->an[d] || (d == DL_CHORDS && p->feel_spans)) && lane_drawn(p, DLANE[d].lane) && !(d == DL_BASS && shaped)) render_mask(s, p, DLANE[d].lane, (1u << p->filled) - 1, 0);
 }
 
 void seq_set_vknob(seq_t *s, int what, int v) {
@@ -5304,6 +6385,7 @@ void seq_set_vknob(seq_t *s, int what, int v) {
         p->lane_shape[LANE_CHORDS][SHAPE_STRUM] = (int)lround(iabs(v) * 12.5);
         p->vstrdir = v < 0;
     }
+    if (what != VK_STR && feel_hands_clear(p) && what != VK_COL) revoice(s, p);   /* 0.28 last touch wins; STRUM moves no note */
     if (what == VK_COL) colour_changed(s, p);
 }
 
@@ -5327,6 +6409,7 @@ void seq_reset_chord_knobs(seq_t *s) {
     push_voicing_snap(s);
     push_snap(s, LANE_CHORDS, 1);   /* one step with the voicing's */
     s->undo[(s->undo_top + SEQ_UNDO - 1) % SEQ_UNDO].knobs = 1;
+    feel_hands_clear(p);   /* 0.28 */
     if (p->vstyle >= 0) part_style(p, p->vstyle);
     else {
         p->vcol = p->vinv = p->vspr = 0;
@@ -5388,6 +6471,7 @@ static int part_edited(const seq_part_t *p) {
     const voicing_style_t *v;
     if (p->vstyle < 0 || p->vstyle >= VOICING_NSTYLES) return 0;
     v = &VOICING_STYLES[p->vstyle];
+    if (feel_has_hands(p)) return 1;   /* 0.28 */
     return p->vmode != v->mode || p->vcol != v->col || p->vinv != v->inv || p->vspr != v->spr || part_vstr(p) != v->str ||
            p->lane_shape[LANE_CHORDS][SHAPE_OCT] != v->oct;
 }
@@ -5406,6 +6490,7 @@ static int voicing_apply(seq_t *s, int i) {
     if (p->vstyle == i && !voicing_edited(s)) return 0;   /* already this style as it is */
     act(s);
     part_style(p, i);
+    feel_hands_clear(p);   /* 0.28 */
     colour_changed(s, p);
     return 1;
 }
@@ -5415,6 +6500,7 @@ void seq_set_chord_octave(seq_t *s, int o) {
     seq_txn_done(s);
     act(s);
     push_voicing_snap(s);   /* the snapshot holds the octave (vox_read) */
+    if (feel_hands_clear(cur(s))) revoice(s, cur(s));   /* 0.28 */
     seq_set_chord_shape(s, SHAPE_OCT, o);
 }
 
@@ -6173,6 +7259,7 @@ void seq_rbar_lock(seq_t *s, int lane) {
         r->lock = 1;
         if (lane == LANE_BASS && !(p->bass.nlock >> b & 1)) {   /* the settings it plays now, frozen */
             p->bass.frozen[b] = p->bass.set;
+            bass_freeze_tones(p, b);
             p->bass.nlock |= (unsigned short)(1u << b);
         }
         if (bar_slot_bits(p, b) & ~p->slot_lock) pick_slots(s, p, bar_slot_bits(p, b));
@@ -6456,14 +7543,10 @@ int seq_hit_oct(const seq_t *s, int bar, int step) {
     return bar >= 0 && bar < SEQ_MAX_BARS && step >= 0 && step < SEQ_STEPS ? ccur(s)->hoct[bar][step] : 0;
 }
 
-int seq_rbar_this_hit_only(seq_t *s) {
-    seq_part_t *p = phrase_chords(s);
+/* What seq_rbar_this_hit_only would answer at bar b's step st: 1 (*at the next hit), or the reason (RHO_*); changes nothing */
+static int once_why(const seq_t *s, const seq_part_t *p, int b, int st, int *at) {
     unsigned char c[16];
-    int b, st, j, end;
-    ph_chord_t was;
-    if (!p) return RHO_NOT_A_CHANGE;
-    b = s->txn.slot, st = s->txn.bsel;
-    end = slot_start_in_bar(p, st) + p->chord_len;   /* 0.24 final review (ruling 31): the change lasts to its slot's end at most */
+    int j, end = slot_start_in_bar(p, st) + p->chord_len;   /* 0.24 final review (ruling 31): the change lasts to its slot's end at most */
     if (end > SEQ_STEPS) end = SEQ_STEPS;
     drawn_codes(p, DL_CHORDS, b, c);   /* 0.24 the hits as drawn (LOCK WITH's) */
     if (!rhythm_is_hit(c[st]) || !seq_chord_change_at(s, b, st)) return RHO_NOT_A_CHANGE;
@@ -6471,6 +7554,18 @@ int seq_rbar_this_hit_only(seq_t *s) {
     if (j == end) return RHO_NO_LATER_HIT;   /* no hit before the next slot (it plays its own chord) */
     if (cp_at(p, b, j) >= 0 || chord_change_at(s, p, b, j)) return RHO_LATER_HAS_OWN;   /* a change before the hit or on it: ended */
     if (p->cp[b][SEQ_CP_MAX - 1].step >= 0) return RHO_FULL;
+    *at = j;
+    return 1;
+}
+
+int seq_rbar_this_hit_only(seq_t *s) {
+    seq_part_t *p = phrase_chords(s);
+    int b, st, j, why;
+    ph_chord_t was;
+    if (!p) return RHO_NOT_A_CHANGE;
+    b = s->txn.slot, st = s->txn.bsel;
+    why = once_why(s, p, b, st, &j);
+    if (why != 1) return why;
     was = slot_chord(p, st ? slot_at(p, b, st - 1) : slot_at(p, b + p->bars - 1, SEQ_STEPS - 1));   /* the chord before the change */
     phrase_push(s, PH_PROG);
     cp_set(s, p, b, j, was.deg, was.src, was.type);
@@ -6858,6 +7953,7 @@ static void jam_apply_part(seq_part_t *p, int d, int c, int l) {
         rbar_t *r = &p->rb[d][b];
         if (d == DL_BASS && r->lock && !(p->bass.nlock >> b & 1)) {
             p->bass.frozen[b] = p->bass.set;
+            bass_freeze_tones(p, b);
             p->bass.nlock |= (unsigned short)(1u << b);
         }
         if (jam_locked(p, d, b)) continue;
@@ -7005,6 +8101,44 @@ int seq_jam_at_bar(const seq_t *s, int lane) {
     if (!seq_jam_queued(s, lane, NULL, NULL)) return -1;
     k = s->next_k + floor_mod(s->part_origin_k - s->next_k, switch_q(p, p->djam[dl_of(lane)].sw));
     return (int)(floor_mod(k - s->part_origin_k, p->bars * SEQ_STEPS) / SEQ_STEPS);
+}
+
+void seq_set_step_fn(seq_t *s, seq_step_fn fn, void *ctx) { s->step_fn = fn, s->step_ctx = ctx; }
+
+void seq_take_block(seq_t *s, int lane, int c, int l) {
+    seq_part_t *p = cur(s);
+    int d = dl_of(lane);
+    if (lane == LANE_MEL_UP) {
+        if (c < 0 || c >= MJ_COLS || l < 0 || l >= MJ_LEVELS) return;
+        mel_jam_now(s);
+        s->mjq_c = (signed char)c, s->mjq_l = (signed char)l, s->mjq_part = s->cur_part;
+        render_queued(s, p, NULL);
+        mel_commit(s);
+        return;
+    }
+    if (d < 0 || c < 0 || c >= JAM_COLS || l < 0 || l >= JAM_LEVELS || !lane_drawn(p, lane)) return;
+    djq_t *q = &s->djq[d];
+    q->c = (signed char)c, q->l = (signed char)l, q->part = s->cur_part, q->tag = 0;
+    djq_render(s, d);
+    djq_commit(s, d);
+    djq_chase(s);
+}
+
+int seq_take_block_get(const seq_t *s, int lane, int *c, int *l) {
+    if (lane != LANE_MEL_UP) return seq_jam_playing(s, lane, c, l);
+    const seq_part_t *p = ccur(s);
+    if (!mel_jam(p)) return 0;
+    if (c) *c = p->mjam.set.c;
+    if (l) *l = p->mjam.set.l;
+    return 1;
+}
+
+void seq_take_restore(seq_t *s, int part, const seq_part_t *from) {
+    if (part < 0 || part >= SEQ_PARTS) return;
+    s->part[part] = *from;
+    if (s->mjq_part == part) s->mjq_c = -1;
+    for (int d = 0; d < DL_COUNT; d++)
+        if (s->djq[d].part == part) s->djq[d].c = -1;
 }
 
 int seq_jam_poll(seq_t *s) {
@@ -7234,9 +8368,10 @@ void seq_medit_hold(seq_t *s) {
 /* Bar b's line as render_mel would make it now (mel_render_bar: its settings, NEW BAR variation and fixes) */
 static void mel_bar_line(const seq_t *s, const seq_part_t *p, int b, mjam_note_t line[SEQ_STEPS]) {
     mel_harm_t h;
-    mjam_loop_in_t in = {s->key, s->scale, p->bars, p->mjam.set, h.bar, p->lane[LANE_MEL_UP].bar_var};
+    mjam_loop_in_t in;
     mel_harm(s, p, &h);
-    mel_render_bar(s, p, &in, &h, b, line, NULL);
+    in = mel_loop_in(s, p, &h, &p->mjam.set);
+    mel_render_bar(p, &in, b, line, NULL);
 }
 
 /* 0.16's rule: NEW BAR always changes the bar when it can (the next variation whose notes differ, up to 8 tries) */
@@ -7283,7 +8418,12 @@ void seq_medit_lock(seq_t *s) {
     if (!medit_live(s)) return;
     b = s->txn.slot;
     push_mel(s);
-    if (!(p->mjam.nlock >> b & 1)) p->mjam.frozen[b] = p->mjam.set;   /* the settings it plays now, frozen */
+    if (!(p->mjam.nlock >> b & 1)) {   /* the settings it plays now, frozen, and its picks */
+        mel_harm_t h;
+        mel_harm(s, p, &h);
+        p->mjam.frozen[b] = p->mjam.set;
+        memcpy(p->mjam.fland[b], h.land[b], SEQ_STEPS);
+    } else memset(p->mjam.fland[b], 0, SEQ_STEPS);
     p->mjam.nlock ^= (unsigned short)(1u << b);
     render_mel(s, p);
 }
@@ -7426,6 +8566,413 @@ int seq_bar_rhythm(const seq_t *s, int lane, int bar, int *edited) {
 
 int seq_bar_locked(const seq_t *s, int lane, int bar) { const rbar_t *r = rbar_at(s, lane, bar); return r ? r->lock : 0; }
 
+/* The Tweak page (seq_core.h) */
+static const signed char TW_WORDS[TW_COUNT] = {5, 6, 5, 5, 5, 3, 4, 4, 5};
+static const signed char TW_BUSY_CX[5] = {12, 32, 50, 66, 88};
+static const signed char TW_ENDING_FB[DL_COUNT][6][2] = {{{0, 0}, {0, 2}, {1, 0}, {3, 0}, {4, 0}},
+                                                         {{0, 0}, {0, 2}, {1, 0}, {2, 0}, {3, 0}, {4, 0}}};   /* FILL, BREATH */
+#define TW_LEAN_STEP 25
+
+int seq_tweak_words(int lane, int what) {
+    if (dl_of(lane) < 0 || what < 0 || what >= TW_COUNT) return 0;
+    return what == TW_ENDING && lane == LANE_BASS ? 6 : TW_WORDS[what];
+}
+
+static int mel_paint(seq_t *s, int bar, int step, int code);
+
+int seq_tweak_word(const seq_t *s, int lane, int what) {
+    const seq_part_t *p = ccur(s);
+    int d = dl_of(lane);
+    if (d < 0) return -1;
+    const signed char *rk = p->rk[d];
+    int cx = p->lane[lane].gen.complexity, push = p->lane_shape[lane][L_PUSH[lane]];
+    switch (what) {
+    case TW_BUSY:
+        for (int i = 0; i < TW_WORDS[TW_BUSY]; i++)
+            if (TW_BUSY_CX[i] == cx) return i;
+        return -1;
+    case TW_OFFBEAT: return rk[RK_SYNC] + 2;
+    case TW_SOFT: return rk[RK_GHOSTS];
+    case TW_LOOSE: return rk[RK_HUM];
+    case TW_LEAN: return push % TW_LEAN_STEP ? -1 : push / TW_LEAN_STEP;
+    case TW_FOLLOW: return p->lw[d];
+    case TW_EARLY: return p->an[d];
+    case TW_LANDS: return rk[RK_CAD];
+    case TW_ENDING:
+        for (int i = 0; i < seq_tweak_words(lane, TW_ENDING); i++)
+            if (TW_ENDING_FB[d][i][0] == rk[RK_FILL] && TW_ENDING_FB[d][i][1] == rk[RK_BREATH]) return i;
+        return -1;
+    default: return -1;
+    }
+}
+
+void seq_tweak_set(seq_t *s, int lane, int what, int word) {
+    int d = dl_of(lane);
+    if (d < 0 || word < 0 || word >= seq_tweak_words(lane, what) || word == seq_tweak_word(s, lane, what) || !lane_drawn(cur(s), lane)) return;
+    if (what == TW_FOLLOW) { seq_set_lockwith(s, lane, word); return; }   /* each its own undo step */
+    if (what == TW_EARLY) { seq_set_anticipate(s, lane, word); return; }
+    seq_txn_done(s);
+    act(s);
+    push_snap(s, lane, 0);
+    s->undo[(s->undo_top + SEQ_UNDO - 1) % SEQ_UNDO].knobs = 2;   /* as RESET KNOBS: undo restores the complexity, SHAPE row and rk */
+    switch (what) {
+    case TW_BUSY: seq_set_complexity(s, lane, TW_BUSY_CX[word]); break;
+    case TW_OFFBEAT: seq_set_rknob(s, lane, RK_SYNC, word - 2); break;
+    case TW_SOFT: seq_set_rknob(s, lane, RK_GHOSTS, word); break;
+    case TW_LOOSE: seq_set_rknob(s, lane, RK_HUM, word); break;
+    case TW_LEAN: seq_set_lane_shape(s, lane, L_PUSH[lane], word * TW_LEAN_STEP); break;
+    case TW_LANDS: seq_set_rknob(s, lane, RK_CAD, word); break;
+    case TW_ENDING:
+        seq_set_rknob(s, lane, RK_FILL, TW_ENDING_FB[d][word][0]);
+        seq_set_rknob(s, lane, RK_BREATH, TW_ENDING_FB[d][word][1]);
+        break;
+    }
+}
+
+/* The bar open for one verb: the caller closes it with seq_rbar_done */
+static int tw_open(seq_t *s, int lane, int bar) {
+    seq_rbar_open(s, lane, bar);
+    return seq_rbar_bar(s, lane) == bar;
+}
+
+static int tw_open_step(seq_t *s, int lane, int bar, int step) {
+    if (step < 0 || step >= SEQ_STEPS || !tw_open(s, lane, bar)) return 0;
+    seq_rbar_select(s, lane, step);
+    return 1;
+}
+
+int seq_tweak_paint(seq_t *s, int lane, int bar, int step, int code) {
+    int r;
+    if (lane == LANE_MEL_UP) return mel_paint(s, bar, step, code);
+    if (!tw_open_step(s, lane, bar, step)) return 0;
+    r = seq_rbar_paint(s, lane, step, code);
+    seq_rbar_done(s, lane);
+    return r;
+}
+
+void seq_tweak_hit_oct(seq_t *s, int bar, int step, int o) {
+    if (!tw_open_step(s, LANE_CHORDS, bar, step)) return;
+    seq_rbar_hit_oct(s, o);
+    seq_rbar_done(s, LANE_CHORDS);
+}
+
+int seq_tweak_can_point(const seq_t *s, int bar, int step) {
+    const seq_part_t *p = ccur(s);
+    if (bar < 0 || bar >= p->bars || step < 0 || step >= SEQ_STEPS) return 0;
+    return cp_at(p, bar, step) >= 0 || pick_slot_at(p, bar, step) < 0;
+}
+
+static int tw_type(int colour) {
+    for (int t = 0; t < CP_TYPES; t++)
+        if (PICK_TYPE[t] == colour) return t;
+    return -1;
+}
+
+int seq_tweak_point_ok(int src, int colour) { return src >= 0 && src <= THEORY_NBORROW && tw_type(colour) >= 0; }
+
+int seq_tweak_chord(seq_t *s, int bar, int step, int deg, int src, int colour) {
+    seq_part_t *p = cur(s);
+    int k, r = 0, type = tw_type(colour);
+    if (!seq_tweak_can_point(s, bar, step) || (deg >= 0 && (!seq_tweak_point_ok(src, colour) || (!src && deg > 6))) || !tw_open_step(s, LANE_CHORDS, bar, step)) return 0;
+    k = cp_at(p, bar, step);
+    if (deg >= 0) {
+        ph_chord_t was = chord_before(p, bar, step, k), now = {src ? theory_borrow_degree(s->scale, src) : deg, src, type};
+        if (was.deg == now.deg && was.src == now.src && was.type == type) deg = -1;   /* the chord that sounds there anyway */
+        else if (k >= 0 || p->cp[bar][SEQ_CP_MAX - 1].step < 0) {   /* a full bar takes no new point */
+            phrase_point(s, &now);
+            r = 1;
+        }
+    }
+    if (deg < 0 && k >= 0) {
+        phrase_point(s, NULL);
+        r = 1;
+    }
+    seq_rbar_done(s, LANE_CHORDS);
+    return r;
+}
+
+int seq_tweak_can_once(const seq_t *s, int bar, int step) {
+    int j;
+    if (bar < 0 || bar >= ccur(s)->bars || step < 0 || step >= SEQ_STEPS) return RHO_NOT_A_CHANGE;
+    return once_why(s, ccur(s), bar, step, &j);
+}
+
+int seq_tweak_once(seq_t *s, int bar, int step) {
+    int r;
+    if (!tw_open_step(s, LANE_CHORDS, bar, step)) return RHO_NOT_A_CHANGE;
+    r = seq_rbar_this_hit_only(s);
+    seq_rbar_done(s, LANE_CHORDS);
+    return r;
+}
+
+int seq_tweak_try(seq_t *s, int lane, int bar) {
+    int r;
+    if (lane == LANE_MEL_UP) {
+        seq_medit_open(s, bar);
+        r = seq_medit_new_bar(s);
+        seq_medit_done(s);
+        return r;
+    }
+    if (!tw_open(s, lane, bar)) return 0;
+    r = seq_rbar_new_bar(s, lane);
+    seq_rbar_done(s, lane);
+    return r;
+}
+
+void seq_tweak_reset(seq_t *s, int lane, int bar) {
+    if (lane == LANE_MEL_UP) {
+        seq_medit_open(s, bar);
+        seq_medit_reset_bar(s);
+        seq_medit_done(s);
+        return;
+    }
+    if (!tw_open(s, lane, bar)) return;
+    seq_rbar_reset_bar(s, lane);
+    seq_rbar_done(s, lane);
+}
+
+void seq_tweak_keep(seq_t *s, int lane, int bar) {
+    if (lane == LANE_MEL_UP) {
+        seq_medit_open(s, bar);
+        seq_medit_lock(s);
+        seq_medit_done(s);
+        return;
+    }
+    if (!tw_open(s, lane, bar)) return;
+    seq_rbar_lock(s, lane);
+    seq_rbar_done(s, lane);
+}
+
+void seq_tweak_copy(seq_t *s, int lane, int bar, unsigned mask, int what) {
+    if (lane == LANE_MEL_UP) { seq_mel_copy(s, bar, mask); return; }
+    if (!tw_open(s, lane, bar)) return;
+    seq_rcopy_set_what(s, lane, what);
+    seq_rbar_copy(s, lane, mask);
+    seq_rbar_done(s, lane);
+}
+
+/* The Bass's Tweak and Feel pages (seq_core.h) */
+void seq_tweak_note(seq_t *s, int bar, int step, int tone, int oct) {
+    seq_part_t *p = cur(s);
+    int code = tone ? bass_pick_code(tone, oct) : 0, i = bar * SEQ_STEPS + step;
+    if (!bass_drawn(p) || bar < 0 || bar >= p->bars || step < 0 || step >= SEQ_STEPS || tone < 0 || tone > BP_ABOVE || oct < -1 || oct > 1) return;
+    if (!bass_step(p, bar, step)->on || p->bass.fix[i] == code) return;
+    seq_txn_done(s);
+    push_bass(s, 0);
+    p->bass.fix[i] = (unsigned char)code;
+    render_one(s, p, LANE_BASS, bar);
+}
+
+void seq_tweak_follow(seq_t *s, int bar) {
+    seq_part_t *p = cur(s);
+    int any = 0;
+    if (!bass_drawn(p) || bar < 0 || bar >= p->bars) return;
+    for (int i = 0; i < SEQ_STEPS; i++) any |= p->bass.fix[bar * SEQ_STEPS + i] && !bass_is_pick(p->bass.fix[bar * SEQ_STEPS + i]);
+    if (!any) return;
+    seq_txn_done(s);
+    push_bass(s, 0);
+    for (int i = 0; i < SEQ_STEPS; i++)
+        if (!bass_is_pick(p->bass.fix[bar * SEQ_STEPS + i])) p->bass.fix[bar * SEQ_STEPS + i] = 0;
+    render_one(s, p, LANE_BASS, bar);
+}
+
+int seq_bass_pick(const seq_t *s, int bar, int step) {
+    const seq_part_t *p = ccur(s);
+    int c = bar >= 0 && bar < p->bars && step >= 0 && step < SEQ_STEPS ? p->bass.fix[bar * SEQ_STEPS + step] : 0;
+    return bass_is_pick(c) ? c : 0;
+}
+
+void seq_tweak_notes(const seq_t *s, int bar, unsigned char note[16]) {
+    const seq_part_t *p = ccur(s);
+    unsigned char c[16];
+    char role[16];
+    if (seq_bar_fill(s, LANE_BASS, bar, c) && bass_drawn(p)) memcpy(note, p->rfill_abs[DL_BASS][bar], 16);
+    else seq_bass_line(s, bar, note, role);
+    for (int i = 0; i < 16; i++)
+        if (!rhythm_is_hit(c[i])) note[i] = 0;
+}
+
+void seq_tweak_as_style(const seq_t *s, int bar, unsigned char note[16]) {
+    const seq_part_t *p = ccur(s);
+    unsigned char c[16];
+    char role[16];
+    memset(note, 0, 16);
+    if (!bass_drawn(p) || bar < 0 || bar >= p->bars) return;
+    bass_key_t k = bass_key(s);
+    bar_harm_t h;
+    seq_bar_fill(s, LANE_BASS, bar, c);
+    bar_harm(s, p, bar, &k, &h);
+    bass_bar_spans(p, bar, bar_set(p, bar, NULL), &h, c, jam_var_pos(p, DL_BASS, bar), 0, note, role);
+}
+
+int seq_bass_off_key(const seq_t *s, int bar) {
+    const seq_part_t *p = ccur(s);
+    if (!bass_drawn(p) || bar < 0 || bar >= p->bars) return -1;
+    bass_key_t k = bass_key(s);
+    for (int i = 0; i < SEQ_STEPS; i++) {
+        int f = p->bass.fix[bar * SEQ_STEPS + i];
+        if (f && !bass_is_pick(f) && bass_step(p, bar, i)->on && !bass_in_scale(&k, f % 12)) return i;
+    }
+    return -1;
+}
+
+/* One undo step for a change to tones and settings: both come back */
+static void tone_begin(seq_t *s, unsigned keep) {
+    seq_txn_done(s);
+    push_bass(s, keep);
+    s->undo[(s->undo_top + SEQ_UNDO - 1) % SEQ_UNDO].prog_too = 1;
+}
+
+void seq_bass_tone_set(seq_t *s, int i, int tone) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r), to = tone == TONE_R ? 0 : tone;
+    if (!bass_drawn(p) || i < 0 || i >= n || tone < TONE_R || tone > TONE_7 || r[i].f.tone == to) return;
+    if (slot_at(p, r[i].start / SEQ_STEPS, r[i].start % SEQ_STEPS) >= SEQ_MAX_PROG) return;   /* a change point's chord */
+    tone_begin(s, 0);
+    for (int t = r[i].start; t < r[i].start + r[i].steps; t++) {
+        int sl = slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS);
+        if (sl < SEQ_MAX_PROG) p->fs[sl].tone = (unsigned char)to;
+    }
+    bass_notes_changed(s, p);
+}
+
+static int tones_any(const seq_part_t *p) {
+    for (int i = 0; i < SEQ_MAX_PROG; i++)
+        if (p->fs[i].tone) return 1;
+    return 0;
+}
+
+static void tones_gone(seq_part_t *p) {
+    for (int i = 0; i < SEQ_MAX_PROG; i++) p->fs[i].tone = 0;
+}
+
+void seq_bass_tones_clear(seq_t *s) {
+    seq_part_t *p = cur(s);
+    if (!bass_drawn(p) || !tones_any(p)) return;
+    tone_begin(s, 0);
+    tones_gone(p);
+    bass_notes_changed(s, p);
+}
+
+void seq_bass_feel_style(seq_t *s, int i) {
+    seq_part_t *p = cur(s);
+    bass_set_t to;
+    if (!bass_drawn(p) || i < 0 || i >= BASS_STYLE_COUNT) return;
+    to = bass_style_set(i);
+    if (!memcmp(&to, &p->bass.set, sizeof to) && !tones_any(p)) return;
+    tone_begin(s, BKEEP_PO | BKEEP_KNOBS);
+    tones_gone(p);
+    p->bass.set = to;
+    bass_notes_changed(s, p);
+}
+
+int seq_bass_row_words(int what) { return what >= 0 && what < BL_COUNT ? (what >= BL_HEIGHT ? 3 : 5) : 0; }
+
+int seq_bass_row_get(const seq_t *s, int what) {
+    const bass_set_t *b = &ccur(s)->bass.set;
+    switch (what) {
+    case BL_MOVES: return b->k[BK_MOV];
+    case BL_OCTAVES: return b->k[BK_OCTS];
+    case BL_STEPS: return b->k[BK_APP];
+    case BL_LOWEST: return b->k[BK_REG] + 2;
+    case BL_HEIGHT: return b->octave + 1;
+    case BL_STAYS: return b->pedal;
+    default: return -1;
+    }
+}
+
+void seq_bass_row(seq_t *s, int what, int word) {
+    seq_part_t *p = cur(s);
+    bass_set_t to = p->bass.set;
+    if (!bass_drawn(p) || word < 0 || word >= seq_bass_row_words(what)) return;
+    switch (what) {
+    case BL_MOVES: to.k[BK_MOV] = (signed char)word; break;
+    case BL_OCTAVES: to.k[BK_OCTS] = (signed char)word; break;
+    case BL_STEPS: to.k[BK_APP] = (signed char)word; break;
+    case BL_LOWEST: to.k[BK_REG] = (signed char)(word - 2); break;
+    case BL_HEIGHT: to.octave = (signed char)(word - 1); break;
+    default: to.pedal = (signed char)word; break;
+    }
+    bset_edit(s, to, BKEEP_PO | BKEEP_KNOBS);
+}
+
+int seq_bass_chord_notes(const seq_t *s, unsigned char *out, int max) {
+    static const signed char NEAR[3] = {TONE_R, TONE_3, TONE_5};
+    const seq_part_t *p = ccur(s);
+    const bass_set_t *b = &p->bass.set;
+    feel_run_t r[SEQ_LANE_STEPS];
+    bass_key_t k = bass_key(s);
+    int n = feel_runs(p, r), ped = bass_pedal_pc(b, &k);
+    if (n > max) n = max;
+    for (int i = 0; i < n; i++) {
+        unsigned char *o = &out[i * BCN_SIZE];
+        int sl = slot_at(p, r[i].start / SEQ_STEPS, r[i].start % SEQ_STEPS);
+        for (int t = TONE_R; t <= TONE_7; t++) o[t] = (unsigned char)bass_root_note(b, tone_pc(s, p, sl, t));
+        o[BCN_NOW] = ped >= 0 ? (unsigned char)bass_root_note(b, ped) : o[r[i].f.tone ? r[i].f.tone : TONE_R];
+    }
+    for (int i = 0; i < n; i++) {
+        const unsigned char *nx = &out[(i + 1) % n * BCN_SIZE];
+        int from = out[i * BCN_SIZE + BCN_NOW], best = TONE_R, gap = 1000;
+        for (int q = 0; q < 3; q++) {
+            int d = nx[NEAR[q]] - from;
+            d = d < 0 ? -d : d;
+            if (d < gap) gap = d, best = NEAR[q];
+        }
+        out[i * BCN_SIZE + BCN_STEP] = (unsigned char)best;
+    }
+    return n;
+}
+
+int seq_bar_fill(const seq_t *s, int lane, int bar, unsigned char out[16]) {
+    const seq_part_t *p = ccur(s);
+    int d = dl_of(lane);
+    seq_bar_plays(s, lane, bar, out);
+    if (!rbar_at(s, lane, bar) || !phrase_end(p, bar) || !fillable(p, d, bar)) return 0;
+    memcpy(out, p->rfill[d][bar], 16);
+    return 1;
+}
+
+void seq_set_part_bar(seq_t *s, int bar) {
+    if (bar > 0 && bar < cur(s)->bars) s->part_origin_k = s->next_k - floor_mod(s->next_k, SEQ_STEPS) - bar * SEQ_STEPS;
+}
+
+int seq_phrase_end(const seq_t *s, int bar) { return bar >= 0 && bar < ccur(s)->bars && phrase_end(ccur(s), bar); }
+
+unsigned seq_tweak_hash(const seq_t *s, int lane) {
+    const seq_part_t *p = ccur(s);
+    unsigned h = seq_feel_hash(s);
+    int d = dl_of(lane);
+    if (lane == LANE_MEL_UP) {
+        int gate = p->mel.kn[MK_GATE], head[] = {mel_jam(p), p->mjam.push, p->mjam.swing, p->mjam.early, p->mjam.loose, gate, p->mjam.nlock, p->bars};
+        HASH_MIX(head, sizeof head);
+        HASH_MIX(&p->mjam.set, sizeof p->mjam.set);
+        HASH_MIX(p->mjam.fix, (size_t)p->bars * SEQ_STEPS);
+        HASH_MIX(p->mline, sizeof(p->mline[0]) * (size_t)p->bars * SEQ_STEPS);
+        return h;
+    }
+    if (d < 0) return h;
+    int head[] = {p->lane[lane].gen.complexity, p->lane_shape[lane][L_PUSH[lane]], p->lw[d], p->an[d], lane_drawn(p, lane)};
+    HASH_MIX(head, sizeof head);
+    HASH_MIX(p->rk[d], sizeof p->rk[d]);
+    HASH_MIX(p->rb[d], sizeof p->rb[d]);
+    HASH_MIX(p->rfill[d], sizeof p->rfill[d]);
+    HASH_MIX(p->sflag[d], (size_t)p->bars * SEQ_STEPS);
+    if (lane == LANE_CHORDS) HASH_MIX(p->hoct, sizeof p->hoct);
+    else {
+        HASH_MIX(&p->bass.set, sizeof p->bass.set);
+        HASH_MIX(&p->bass.nlock, sizeof p->bass.nlock);
+        HASH_MIX(p->bass.fix, (size_t)p->bars * SEQ_STEPS);
+        HASH_MIX(p->rfill_abs[d], sizeof p->rfill_abs[d]);
+    }
+    for (int t = 0; t < p->bars * SEQ_STEPS; t++) {
+        const seq_step_t *st = &p->lane[lane].steps[t];
+        unsigned char c[] = {st->on, st->len, (unsigned char)st->vel, lane == LANE_BASS ? st->abs : 0};
+        HASH_MIX(c, sizeof c);
+    }
+    return h;
+}
+
 int seq_bar_hits(const seq_t *s, int lane, int bar) {
     int n = 0;
     if (!rbar_at(s, lane, bar)) return 0;
@@ -7553,6 +9100,16 @@ int seq_part_used(const seq_t *s, int part) { return part >= 0 && part < SEQ_NPA
 
 /* On the UI thread: the part's first use copies the Verse (stale with it), and a stale part catches up here, so seq_block
  * only ever switches to a part that is ready. */
+/* A part about to play: on first use a copy of the Verse, and caught up if a key or scale change missed it (setters only) */
+static void ready_part(seq_t *s, int part) {
+    if (!seq_part_used(s, part)) {
+        s->part[part] = s->part[0];
+        s->used_mask |= 1 << part;
+        s->stale_mask = (s->stale_mask & ~(1 << part)) | (s->stale_mask & 1) << part;
+    }
+    if (s->stale_mask >> part & 1) refresh(s, part);
+}
+
 void seq_select_part(seq_t *s, int part) {
     if (part < 0 || part >= SEQ_NPARTS) return;
     if (part == s->cur_part || (s->playing && part == s->queued)) {   /* stopped, nothing is ever queued */
@@ -7562,14 +9119,200 @@ void seq_select_part(seq_t *s, int part) {
     }
     txn_cancel(s);   /* 0.17: an open picker or browser is the part being left's */
     act(s);
-    if (!seq_part_used(s, part)) {
-        s->part[part] = s->part[0];
-        s->used_mask |= 1 << part;
-        s->stale_mask = (s->stale_mask & ~(1 << part)) | (s->stale_mask & 1) << part;
-    }
-    if (s->stale_mask >> part & 1) refresh(s, part);
+    ready_part(s, part);
     s->queued = part;
-    if (!s->playing) switch_part(s, 0);
+    if (s->arr.n && s->arr.edit < 0) {   /* 0.27 a part button leaves the song's order: the part's first row after the playing one */
+        seq_arr_t *a = &s->arr;
+        a->follow = 0;
+        a->jump = -1;
+        a->next_row = SEQ_ARR_MAX;
+        for (int i = 1; i <= a->n; i++)
+            if (a->row[(a->cur + i + a->n) % a->n].part == part) {
+                a->next_row = (a->cur + i + a->n) % a->n;
+                break;
+            }
+    }
+    if (!s->playing) {
+        switch_part(s, 0);
+        arr_selected(s);
+    }
+}
+
+/* 0.27 the arrangement */
+
+/* A part's bars as a row would play them: its own once in use, else the Verse's (its first use copies the Verse) */
+static int arr_bars(const seq_t *s, int part) { return s->part[seq_part_used(s, part) ? part : 0].bars; }
+
+static int arr_ok(const seq_t *s, const seq_arr_row_t *r, int n) {
+    if (n < 0 || n > SEQ_ARR_MAX || (n && !r)) return 0;
+    for (int i = 0; i < n; i++)
+        if (r[i].part >= SEQ_NPARTS || r[i].passes < 1 || r[i].passes > 16 || r[i].passes * arr_bars(s, r[i].part) > 64 ||
+            r[i].mute >> SEQ_ACTIVE_LANES)
+            return 0;
+    return 1;
+}
+
+/* An index of the song before through map (-1 removed or none); next_row's SEQ_ARR_MAX (the song lacks the part) stays */
+static int arr_remap(int x, int had, const signed char *map) { return x == SEQ_ARR_MAX ? x : map && x >= 0 && x < had ? map[x] : -1; }
+
+int seq_arr_set(seq_t *s, const seq_arr_row_t *rows, int n, const signed char *map) {
+    seq_arr_t *a = &s->arr;
+    int had = a->n, took = -1;
+    if (!arr_ok(s, rows, n)) return 0;
+    for (int i = 0; map && i < had; i++)
+        if (map[i] < -1 || map[i] >= n) return 0;
+    act(s);
+    if (!n) {
+        arr_clear(a);
+        return 1;
+    }
+    for (int i = 0; i < n; i++) ready_part(s, rows[i].part);
+    if (map && a->cur >= 0 && map[a->cur] < 0) {   /* the playing row removed: the row that took its place */
+        took = 0;
+        for (int i = 0; i < a->cur; i++) took += map[i] >= 0;
+        took %= n;
+    }
+    int cur = arr_remap(a->cur, had, map), jump = arr_remap(a->jump, had, map), edit = arr_remap(a->edit, had, map);
+    int next = a->next_row < 0 ? -1 : arr_remap(a->next_row, had, map);
+    if (s->playing && a->cur >= 0 && cur >= 0 && a->row[a->cur].part == s->cur_part && rows[cur].passes != a->row[a->cur].passes) {
+        /* VST-66 the playing row's length changes: a row that has looped counts from this pass, or its place (steps from its start, by its length) would jump */
+        long len = (long)a->row[a->cur].passes * ccur(s)->bars * SEQ_STEPS, done = s->next_k - s->part_origin_k;
+        if (done >= len) s->part_origin_k += done / len * len;
+    }
+    if (!had) arr_clear(a);   /* a new song follows, from no pass played */
+    memcpy(a->row, rows, sizeof *rows * (size_t)n);
+    a->n = n;
+    a->cur = cur;
+    a->jump = jump == cur ? -1 : jump;
+    a->edit = edit;
+    a->next_row = next;
+    if (!map) a->pass = 0;
+    if (took >= 0) {
+        if (!s->playing) arr_start(s, took, 0);
+        else if (a->jump < 0) a->jump = took;
+    }
+    if (arr_playing_row(s)) arr_mutes(s, a->row[a->cur].mute);   /* the playing row's mutes are its part's */
+    return 1;
+}
+
+int seq_arr_rows(const seq_t *s, seq_arr_row_t *out) {
+    if (out && s->arr.n) memcpy(out, s->arr.row, sizeof *out * (size_t)s->arr.n);
+    return s->arr.n;
+}
+
+int seq_arr_row(const seq_t *s) { return s->arr.n ? s->arr.cur : -1; }
+int seq_arr_pass(const seq_t *s) { return s->arr.pass; }
+int seq_arr_follow(const seq_t *s) { return s->arr.follow; }
+
+void seq_arr_set_follow(seq_t *s, int on) {
+    act(s);
+    s->arr.follow = on != 0;
+}
+
+void seq_arr_set_row_mute(seq_t *s, int row, int lane, int muted) {
+    seq_arr_t *a = &s->arr;
+    if (row < 0 || row >= a->n || lane < 0 || lane >= SEQ_ACTIVE_LANES) return;
+    act(s);
+    a->row[row].mute = (unsigned char)((a->row[row].mute & ~(1 << lane)) | (muted ? 1 << lane : 0));
+    if (row == a->cur && arr_playing_row(s)) mute_lane(s, lane, muted);
+}
+
+void seq_arr_jump(seq_t *s, int row) {
+    seq_arr_t *a = &s->arr;
+    if (row < 0 || row >= a->n) return;
+    act(s);
+    if (!s->playing) {
+        ready_part(s, a->row[row].part);
+        a->jump = -1;
+        arr_start(s, row, 0);
+        return;
+    }
+    a->jump = row == a->jump || row == a->cur ? -1 : row;
+}
+
+int seq_arr_jumping(const seq_t *s) { return s->arr.jump; }
+int seq_arr_editing(const seq_t *s) { return s->arr.edit; }
+
+void seq_arr_edit(seq_t *s, int row) {
+    seq_arr_t *a = &s->arr;
+    if (row < -1 || row >= a->n || row == a->edit) return;
+    act(s);
+    if (row < 0) {
+        a->edit = -1;
+        if (a->jump >= 0) a->jump = -1;   /* left before the held row started: the song goes on where it was */
+        if (a->cur >= 0 && a->row[a->cur].part == s->cur_part) {
+            arr_mutes(s, a->row[a->cur].mute);
+            if (a->follow && a->pass < a->row[a->cur].passes - 1) a->pass = a->row[a->cur].passes - 1;   /* this pass is the last */
+        }
+        return;
+    }
+    a->edit = row;
+    if (row == a->cur && a->row[row].part == s->cur_part) {
+        a->jump = -1;   /* 0.27.1 its mutes stay: › keeps sounding what played, now looping */
+    } else if (s->playing) {
+        a->jump = row;
+    } else {
+        a->jump = -1;
+        arr_start(s, row, 0);
+    }
+}
+
+double seq_arr_row_steps(const seq_t *s) {
+    const seq_arr_t *a = &s->arr;
+    if (!a->n || a->cur < 0 || !s->playing || a->row[a->cur].part != s->cur_part) return -1;
+    double len = (double)a->row[a->cur].passes * ccur(s)->bars * SEQ_STEPS, x = fmod(s->last_ppq * 4.0 - (double)s->part_origin_k, len);
+    return x < 0 ? x + len : x;
+}
+
+double seq_arr_next_steps(const seq_t *s) {
+    const seq_arr_t *a = &s->arr;
+    long origin = s->part_origin_k, len = (long)ccur(s)->bars * SEQ_STEPS, k;
+    double pos = s->last_ppq * 4.0;
+    if (!a->n || !s->playing) return -1;
+    if (a->jump >= 0) {
+        k = s->next_k + floor_mod(origin - s->next_k, SEQ_STEPS);   /* the first bar line not yet played */
+        if (k == origin) k += SEQ_STEPS;
+        return k - pos;
+    }
+    if (!a->follow || a->edit >= 0) return -1;
+    k = origin + (a->cur < 0 ? a->pass + 1 : (a->pass + 1 > a->row[a->cur].passes ? a->pass + 1 : a->row[a->cur].passes)) * len;
+    return k - pos;
+}
+
+#define FC (1 << LANE_CHORDS)
+#define FB (1 << LANE_BASS)
+#define FM (1 << LANE_MEL_UP)
+enum { FV, FI, FP, FCH, FBR, FO };   /* the parts by index (SEQ_PART_NAME) */
+static const struct { const char *name; int n; seq_form_row_t row[10]; } FORMS[SEQ_ARR_FORMS] = {
+    {"Pop", 10, {{FI, 4, FB | FM}, {FV, 8, FM}, {FP, 4, 0}, {FCH, 8, 0}, {FV, 8, 0}, {FP, 4, 0}, {FCH, 8, 0}, {FBR, 8, FB}, {FCH, 8, 0},
+                 {FO, 4, FM}}},
+    {"Club", 7, {{FI, 16, FC | FM}, {FV, 16, FM}, {FP, 8, FB}, {FCH, 16, 0}, {FBR, 8, FB | FM}, {FCH, 16, 0}, {FO, 16, FC | FM}}},
+    {"Ballad", 9, {{FI, 4, FB | FM}, {FV, 8, FB}, {FV, 8, 0}, {FCH, 8, 0}, {FV, 8, 0}, {FCH, 8, 0}, {FBR, 4, FB}, {FCH, 8, 0},
+                   {FO, 4, FB | FM}}},
+    {"Rock", 9, {{FI, 4, FM}, {FV, 8, FM}, {FCH, 8, 0}, {FV, 8, 0}, {FCH, 8, 0}, {FBR, 8, 0}, {FCH, 8, 0}, {FCH, 8, 0}, {FO, 4, FM}}},
+    {"Loop", 1, {{FV, 8, 0}}},
+};
+
+int seq_arr_form(int form, seq_form_row_t *out) {
+    if (form < 0 || form >= SEQ_ARR_FORMS) return 0;
+    if (out) memcpy(out, FORMS[form].row, sizeof *out * (size_t)FORMS[form].n);
+    return FORMS[form].n;
+}
+
+const char *seq_arr_form_name(int form) { return form >= 0 && form < SEQ_ARR_FORMS ? FORMS[form].name : NULL; }
+
+int seq_arr_set_form(seq_t *s, int form) {
+    seq_arr_row_t r[SEQ_ARR_MAX];
+    int n = seq_arr_form(form, NULL);
+    if (!n) return 0;
+    for (int i = 0; i < n; i++) {
+        const seq_form_row_t *f = &FORMS[form].row[i];
+        int bars = arr_bars(s, f->part), passes = (f->bars + bars - 1) / bars;
+        if (passes < 1) passes = 1;
+        while (passes > 1 && passes * bars > 64) passes--;
+        r[i] = (seq_arr_row_t){f->part, (unsigned char)passes, f->mute};
+    }
+    return seq_arr_set(s, r, n, NULL);
 }
 
 /* 0.12 move feedback */
@@ -7805,4 +9548,724 @@ void seq_mel_flags(const seq_t *s, int *rev, int *inv, int *shift) {
     if (rev) *rev = r.rev;
     if (inv) *inv = r.inv;
     if (shift) *shift = r.shift;
+}
+
+/* The Melody's Feel and Tweak pages (seq_core.h) */
+_Static_assert((int)MP_BELOW == (int)BP_BELOW && (int)MP_ABOVE == (int)BP_ABOVE, "the pages' half-step picks are one list");
+static const unsigned char ML_WORDS[ML_COUNT] = {MF_COUNT, MA_COUNT, 4, 3, 4, 3, 4, 5, 3, 6, 5, 5, 5, 4, 4, 4, 4};
+static const unsigned char ML_LENGTH_GATE[5] = {20, 35, 50, 75, 100};
+#define ML_LEAN_STEP 25
+
+int seq_mel_row_words(int what) { return what >= 0 && what < ML_COUNT ? ML_WORDS[what] : 0; }
+
+int seq_mel_row_get(const seq_t *s, int what) {
+    const seq_part_t *p = ccur(s);
+    const mjam_set_t *m = &p->mjam.set;
+    switch (what) {
+    case ML_FORM: return m->form;
+    case ML_ANSWER: return m->ans;
+    case ML_STRAY: return m->stray;
+    case ML_AOCT: return m->aoct + 1;
+    case ML_VARIES: return m->var;
+    case ML_HEIGHT: return m->reg;
+    case ML_WIDE: return m->rng + 1;
+    case ML_BUSY: return m->dens + 2;
+    case ML_SPEED: return m->tm + 1;
+    case ML_SWING: return p->mjam.swing;
+    case ML_LENGTH:
+        for (int i = 0; i < 5; i++) if (ML_LENGTH_GATE[i] == p->mel.kn[MK_GATE]) return i;
+        return -1;
+    case ML_LOOSE: return p->mjam.loose;
+    case ML_LEAN: return p->mjam.push % ML_LEAN_STEP ? -1 : p->mjam.push / ML_LEAN_STEP;
+    case ML_EARLY: return p->mjam.early;
+    case ML_BREATH: return m->breath;
+    case ML_LEADIN: return m->fill;
+    case ML_LANDS: return m->cad;
+    default: return -1;
+    }
+}
+
+/* An undo step that brings the settings back too (restore_lane), after making the lane JAM: that conversion is the step when it runs */
+static void mel_settings_step(seq_t *s, int prog) {
+    if (!mel_jam(cur(s))) { mel_jam_now(s); return; }
+    seq_txn_done(s);
+    act(s);
+    push_undo(s, LANE_MEL_UP);
+    s->undo[(s->undo_top + SEQ_UNDO - 1) % SEQ_UNDO].knobs = 2;
+    s->undo[(s->undo_top + SEQ_UNDO - 1) % SEQ_UNDO].prog_too = (unsigned char)prog;
+}
+
+/* Answer `ans` on settings m: FORM LOOP becomes 1+1, SWAP equal to the call moves on to another block (seq_mel_row's, seq_mel_view_answer's) */
+static void mel_answer_put(mjam_set_t *m, int ans) {
+    if (m->form == MF_LOOP) m->form = MF_1_1;
+    m->ans = (signed char)ans;
+    if (ans == MA_SWAP && m->sc == m->c && m->sl == m->l) m->sc = (signed char)((m->sc + 1) % MJ_COLS);
+}
+
+void seq_mel_row(seq_t *s, int what, int word) {
+    seq_part_t *p = cur(s);
+    mjam_set_t *m = &p->mjam.set;
+    if (word < 0 || word >= seq_mel_row_words(what)) return;
+    if (word == seq_mel_row_get(s, what) && (what != ML_LANDS || m->cadc) && mel_jam(p)) return;
+    mel_settings_step(s, 0);
+    switch (what) {
+    case ML_FORM: m->form = (signed char)word; break;
+    case ML_ANSWER:
+        if (m->ans == MA_ECHO && word != MA_ECHO) m->stray = 3;   /* ALL: an answer changes the whole bar */
+        mel_answer_put(m, word);
+        break;
+    case ML_STRAY: m->stray = (signed char)word; break;
+    case ML_AOCT: m->aoct = (signed char)(word - 1); break;
+    case ML_VARIES: m->var = (signed char)word; break;
+    case ML_HEIGHT: m->reg = (signed char)word; break;
+    case ML_WIDE: m->rng = (signed char)(word - 1); break;
+    case ML_BUSY: m->dens = (signed char)(word - 2); break;
+    case ML_SPEED: m->tm = (signed char)(word - 1); break;
+    case ML_SWING: p->mjam.swing = (unsigned char)word; break;
+    case ML_LENGTH: p->mel.kn[MK_GATE] = ML_LENGTH_GATE[word]; break;
+    case ML_LOOSE: p->mjam.loose = (unsigned char)word; break;
+    case ML_LEAN: p->mjam.push = (unsigned char)(word * ML_LEAN_STEP); break;
+    case ML_EARLY: p->mjam.early = (unsigned char)word; break;
+    case ML_BREATH: m->breath = (signed char)word; break;
+    case ML_LEADIN: m->fill = (signed char)word; break;
+    case ML_LANDS: m->cad = (signed char)word, m->cadc = 1; break;
+    }
+    render_mel(s, p);
+}
+
+void seq_mel_answer_block(seq_t *s, int c, int l) {
+    seq_part_t *p = cur(s);
+    mjam_set_t *m = &p->mjam.set;
+    if (c < 0 || c >= MJ_COLS || l < 0 || l >= MJ_LEVELS || (c == m->sc && l == m->sl) || (c == m->c && l == m->l)) return;
+    mel_settings_step(s, 0);
+    m->sc = (signed char)c, m->sl = (signed char)l;
+    render_mel(s, p);
+}
+
+/* A chord's pick in place, no undo step */
+static void mel_tone_put(seq_part_t *p, const feel_run_t *r, int tone, int oct) {
+    for (int t = r->start; t < r->start + r->steps; t++) {
+        int sl = slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS);
+        if (sl < SEQ_MAX_PROG) p->fs[sl].mtone = (unsigned char)tone, p->fs[sl].moct = (signed char)oct;
+    }
+}
+
+void seq_mel_tone_set(seq_t *s, int i, int tone, int oct) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r);
+    if (i < 0 || i >= n || tone < 0 || tone > TONE_7 || oct < -1 || oct > 1 || !mel_jam(p)) return;
+    if (!tone) oct = 0;
+    if (r[i].f.mtone == tone && r[i].f.moct == oct) return;
+    if (slot_at(p, r[i].start / SEQ_STEPS, r[i].start % SEQ_STEPS) >= SEQ_MAX_PROG) return;   /* a change point's chord */
+    mel_settings_step(s, 1);
+    mel_tone_put(p, &r[i], tone, oct);
+    render_mel(s, p);
+}
+
+void seq_mel_tones_clear(seq_t *s) {
+    seq_part_t *p = cur(s);
+    int any = 0;
+    for (int i = 0; i < SEQ_MAX_PROG; i++) any |= p->fs[i].mtone;
+    if (!any || !mel_jam(p)) return;
+    mel_settings_step(s, 1);
+    for (int i = 0; i < SEQ_MAX_PROG; i++) p->fs[i].mtone = 0, p->fs[i].moct = 0;
+    render_mel(s, p);
+}
+
+/* Of chord table x (MCN_TABLE on), the root, 3rd or 5th nearest note `from`: its tone, 0 none, and octave */
+static int mel_nearest_stop(const unsigned char *x, int from, int *oct) {
+    static const signed char NEAR[3] = {TONE_R, TONE_3, TONE_5};
+    int gap = 1000, tone = 0;
+    for (int q = 0; q < 3; q++)
+        for (int o = -1; o <= 1; o++) {
+            int m = x[MJ_LAND_AT(NEAR[q], o) - 1], d = m - from;
+            d = d < 0 ? -d : d;
+            if (m && (d < gap || (d == gap && o == 0))) gap = d, tone = NEAR[q], *oct = o;
+        }
+    return tone;
+}
+
+/* What plays where chord r starts: Early's note sits ahead of the chord */
+static int mel_chord_now(const seq_part_t *p, const feel_run_t *r) {
+    int len = p->bars * SEQ_STEPS;
+    if (p->mjam.early && p->mline[r->start].hold)
+        for (int k = 1; k <= AN_STEPS[p->mjam.early & 3]; k++)
+            if (p->mline[(r->start - k + len) % len].note) return p->mline[(r->start - k + len) % len].note;
+    for (int k = r->start; k < r->start + r->steps; k++)
+        if (p->mline[k % len].note) return p->mline[k % len].note;
+    return 0;
+}
+
+/* Each run's MCN_TUNE and table, which no pick changes */
+static void mel_chord_tables(const seq_t *s, const seq_part_t *p, const feel_run_t *r, int n, unsigned char *out) {
+    mel_harm_t h;
+    mjam_loop_in_t in;
+    mel_harm(s, p, &h);
+    in = mel_loop_in(s, p, &h, &p->mjam.set);
+    for (int i = 0; i < n; i++) {
+        unsigned char *o = &out[i * MCN_SIZE], t[MJ_LAND_NOTES];
+        int b = r[i].start / SEQ_STEPS, st = r[i].start % SEQ_STEPS, z = st + r[i].steps > SEQ_STEPS ? SEQ_STEPS : st + r[i].steps;
+        mjam_land_notes(&in, b, mel_bar_set(p, b), st, z, t);
+        o[MCN_TUNE] = t[0];
+        memcpy(&o[MCN_TABLE], &t[1], MJ_LAND_NOTES - 1);
+    }
+}
+
+int seq_mel_chord_notes(const seq_t *s, unsigned char *out, int max) {
+    const seq_part_t *p = ccur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    int n = feel_runs(p, r);
+    if (n > max) n = max;
+    memset(out, 0, (size_t)n * MCN_SIZE);
+    if (!mel_jam(p)) return n;
+    mel_chord_tables(s, p, r, n, out);
+    for (int i = 0; i < n; i++) out[i * MCN_SIZE + MCN_NOW] = (unsigned char)mel_chord_now(p, &r[i]);
+    for (int i = 0; i < n; i++) {
+        unsigned char *o = &out[i * MCN_SIZE];
+        int oct = 0;
+        o[MCN_STEP_TONE] = (unsigned char)mel_nearest_stop(&out[(i + 1) % n * MCN_SIZE + MCN_TABLE], o[MCN_NOW] ? o[MCN_NOW] : o[MCN_TUNE], &oct);
+        o[MCN_STEP_OCT] = (unsigned char)(oct + 1);
+    }
+    return n;
+}
+
+void seq_mel_smooth(seq_t *s) {
+    seq_part_t *p = cur(s);
+    feel_run_t r[SEQ_LANE_STEPS];
+    unsigned char o[SEQ_MAX_PROG * MCN_SIZE];
+    int n = feel_runs(p, r), from;
+    if (n < 2 || n > SEQ_MAX_PROG || !mel_jam(p) || p->mjam.set.c == MJ_PEDAL) return;
+    mel_chord_tables(s, p, r, n, o);
+    from = mel_chord_now(p, &r[0]);
+    from = from ? from : o[MCN_TUNE];
+    mel_settings_step(s, 1);
+    for (int i = 1; i < n; i++) {
+        const unsigned char *x = &o[i * MCN_SIZE + MCN_TABLE];
+        int oct = 0, tone = mel_nearest_stop(x, from, &oct);
+        if (!tone || slot_at(p, r[i].start / SEQ_STEPS, r[i].start % SEQ_STEPS) >= SEQ_MAX_PROG) continue;
+        mel_tone_put(p, &r[i], tone, oct);
+        from = x[MJ_LAND_AT(tone, oct) - 1];
+    }
+    render_mel(s, p);
+}
+
+void seq_mel_note(seq_t *s, int bar, int step, int tone, int oct) {
+    seq_part_t *p = cur(s);
+    int i = bar * SEQ_STEPS + step, code = tone ? mjam_pick_code(tone, oct) : 0;
+    if (bar < 0 || bar >= p->bars || step < 0 || step >= SEQ_STEPS || tone < 0 || tone > MP_BLUE || oct < -1 || oct > 1 || !mel_jam(p) || p->mjam.fix[i] == code) return;
+    if (!p->mline[i].note && !mjam_is_pick(p->mjam.fix[i])) return;
+    seq_txn_done(s);
+    push_mel(s);
+    p->mjam.fix[i] = (unsigned char)code;
+    render_mel(s, p);
+}
+
+void seq_mel_follow(seq_t *s, int bar) {
+    seq_part_t *p = cur(s);
+    int any = 0;
+    if (bar < 0 || bar >= p->bars || !mel_jam(p)) return;
+    for (int i = 0; i < SEQ_STEPS; i++) any |= p->mjam.fix[bar * SEQ_STEPS + i] >= 1 && p->mjam.fix[bar * SEQ_STEPS + i] <= 127;
+    if (!any) return;
+    seq_txn_done(s);
+    push_mel(s);
+    for (int i = 0; i < SEQ_STEPS; i++)
+        if (p->mjam.fix[bar * SEQ_STEPS + i] <= 127) p->mjam.fix[bar * SEQ_STEPS + i] = 0;
+    render_mel(s, p);
+}
+
+static int mel_paint(seq_t *s, int bar, int step, int code) {
+    seq_part_t *p = cur(s);
+    int i = bar * SEQ_STEPS + step, was = mel_jam(p), f;
+    if (bar < 0 || bar >= p->bars || step < 0 || step >= SEQ_STEPS) return 0;
+    if (code == RC_HOLD && (!step || (!p->mline[i - 1].note && !p->mline[i - 1].hold))) return 0;
+    f = code == RC_REST ? MJ_FIX_REST : code == RC_HOLD ? MJ_FIX_HOLD : code == RC_HIT ? mjam_pick_code(TONE_R, 0) : 0;
+    if (!f || p->mjam.fix[i] == f) return 0;
+    seq_txn_done(s);
+    if (was) push_mel(s);
+    else mel_jam_now(s);
+    p->mjam.fix[i] = (unsigned char)f;
+    render_mel(s, p);
+    return 1;
+}
+
+/* A note as a job in chord ch: its tone, or the nearest (a chromatic note has none of its own) */
+static int mel_tone_of(const mjam_chord_t *ch, int note) {
+    int best = TONE_R, gap = 100;
+    for (int t = 0; t < 7; t++) {
+        int d = pmod(note - ch->tone[t] + 6, 12) - 6;
+        d = d < 0 ? -d : d;
+        if (d < gap) gap = d, best = t + 1;
+    }
+    return best;
+}
+
+void seq_mel_copy(seq_t *s, int bar, unsigned mask) {
+    seq_part_t *p = cur(s);
+    mel_harm_t h;
+    if (bar < 0 || bar >= p->bars || !mel_jam(p)) return;
+    mask &= ~(unsigned)p->mjam.nlock & ~(1u << bar) & ((1u << p->bars) - 1);
+    if (!mask) return;
+    seq_txn_done(s);
+    push_mel(s);
+    mel_harm(s, p, &h);
+    for (int b = 0; b < p->bars; b++) {
+        if (!(mask >> b & 1)) continue;
+        for (int i = 0; i < SEQ_STEPS; i++) {
+            const mjam_note_t *x = &p->mline[bar * SEQ_STEPS + i];
+            int f = p->mjam.fix[bar * SEQ_STEPS + i];
+            p->mjam.fix[b * SEQ_STEPS + i] = (unsigned char)(mjam_is_pick(f) ? f : x->note ? mjam_pick_code(mel_tone_of(h.bar[bar].chord[i], x->note), 0) : x->hold ? MJ_FIX_HOLD : MJ_FIX_REST);
+        }
+    }
+    render_mel(s, p);
+}
+
+void seq_mel_as_tune(const seq_t *s, int bar, unsigned char note[16]) {
+    const seq_part_t *p = ccur(s);
+    memset(note, 0, 16);
+    if (bar < 0 || bar >= p->bars || !mel_jam(p)) return;
+    mel_harm_t h;
+    mel_harm(s, p, &h);
+    mjam_loop_in_t in = mel_loop_in(s, p, &h, &p->mjam.set);
+    mjam_note_t l[SEQ_STEPS];
+    mjam_bar(&in, bar, mel_bar_set(p, bar), l);
+    for (int i = 0; i < SEQ_STEPS; i++) note[i] = l[i].note;
+}
+
+static int mel_fix_at(const seq_t *s, int bar, int step) {
+    const seq_part_t *p = ccur(s);
+    return bar >= 0 && bar < p->bars && step >= 0 && step < SEQ_STEPS ? p->mjam.fix[bar * SEQ_STEPS + step] : 0;
+}
+
+int seq_mel_pick(const seq_t *s, int bar, int step) {
+    int f = mel_fix_at(s, bar, step);
+    return mjam_is_pick(f) ? f : 0;
+}
+
+int seq_mel_fixed(const seq_t *s, int bar, int step) {
+    int f = mel_fix_at(s, bar, step);
+    return f <= 127 ? f : 0;
+}
+
+int seq_mel_off_key(const seq_t *s, int bar) {
+    const seq_part_t *p = ccur(s);
+    if (!mel_jam(p) || bar < 0 || bar >= p->bars) return -1;
+    bass_key_t k = bass_key(s);
+    for (int i = 0; i < SEQ_STEPS; i++) {
+        int f = p->mjam.fix[bar * SEQ_STEPS + i];
+        if (f >= 1 && f <= 127 && p->mline[bar * SEQ_STEPS + i].note && !bass_in_scale(&k, f % 12)) return i;
+    }
+    return -1;
+}
+
+int seq_mel_bar_locked(const seq_t *s, int bar) { return bar >= 0 && bar < SEQ_MAX_BARS ? ccur(s)->mjam.nlock >> bar & 1 : 0; }
+
+int seq_mel_gap_bar(const seq_t *s, int bar) {
+    const seq_part_t *p = ccur(s);
+    return mel_jam(p) && bar >= 0 && bar < p->bars ? mjam_gap_bar(mel_bar_set(p, bar), bar, p->bars) : 0;
+}
+
+int seq_mel_role(const seq_t *s, int bar) {
+    const seq_part_t *p = ccur(s);
+    return mel_jam(p) && bar >= 0 && bar < p->bars ? mjam_role(mel_bar_set(p, bar)->form, bar % 4, NULL) : 0;
+}
+
+void seq_mel_notes(const seq_t *s, int bar, unsigned char note[16]) {
+    mjam_note_t l[SEQ_STEPS];
+    seq_mel_line(s, bar, l);
+    for (int i = 0; i < SEQ_STEPS; i++) note[i] = l[i].note;
+}
+
+int seq_mel_rest_fixed(const seq_t *s, int bar, int step) {
+    int f = mel_fix_at(s, bar, step);
+    return f == MJ_FIX_REST || f == MJ_FIX_HOLD;
+}
+
+void seq_mel_blocks(const seq_t *s, int *c, int *l, int *sc, int *sl) {
+    const mjam_set_t *m = &ccur(s)->mjam.set;
+    *c = m->c, *l = m->l, *sc = m->sc, *sl = m->sl;
+}
+
+/* Try and keep (iOS): the chord on each step, and "chords lead" (the Bass and the Melody follow a chord change). Called by the iOS host only */
+
+void seq_chord_steps(const seq_t *s, const seq_part_t *p, unsigned short out[SEQ_LANE_STEPS]) {
+    int n = p->bars * SEQ_STEPS, last = -1;
+    unsigned short c = 0;
+    for (int t = 0; t < SEQ_LANE_STEPS; t++) {
+        int slot = t < n ? slot_at(p, t / SEQ_STEPS, t % SEQ_STEPS) : -1;
+        if (slot >= 0 && slot != last) {   /* as chord_toned and mjam_chord_of read it: the root in the slot's scale, and the triad on it */
+            int sc = slot_scale(s, p, slot);
+            c = (unsigned short)((theory_degree_pc(s->key, sc, p->prog[slot]) + 1) | theory_triad_quality(s->key, sc, p->prog[slot]) << 4);
+        }
+        last = slot;
+        out[t] = slot >= 0 ? c : 0;
+    }
+}
+
+unsigned seq_chords_changed(const unsigned short *a, const unsigned short *b, int bars) {
+    unsigned m = 0;
+    for (int t = 0; t < (bars < SEQ_MAX_BARS ? bars : SEQ_MAX_BARS) * SEQ_STEPS; t++)
+        if (a[t] != b[t]) m |= 1u << (t / SEQ_STEPS);
+    return m;
+}
+
+unsigned seq_chords_diff(const seq_t *s, const seq_part_t *a, const seq_part_t *b, int bars) {
+    unsigned short ca[SEQ_LANE_STEPS], cb[SEQ_LANE_STEPS];
+    seq_chord_steps(s, a, ca);
+    seq_chord_steps(s, b, cb);
+    return seq_chords_changed(ca, cb, bars);
+}
+
+const seq_part_t *seq_part_at(const seq_t *s, int part) { return part >= 0 && part < SEQ_PARTS ? &s->part[part] : NULL; }
+
+#define FOLLOW_BOTH (1u << LANE_BASS | 1u << LANE_MEL_UP)
+
+/* The bars of mask follow the chords on the lanes of `lanes` (bit LANE_BASS, LANE_MEL_UP): absolute fixed notes go, kept bars are kept no more
+ * (apply 0: only says whether anything would change) */
+static int follow_bars(seq_part_t *p, unsigned mask, unsigned lanes, int apply) {
+    int any = 0, on[2] = {lanes >> LANE_BASS & 1, lanes >> LANE_MEL_UP & 1};
+    for (int b = 0; b < SEQ_MAX_BARS; b++) {
+        if (!(mask >> b & 1)) continue;
+        for (int i = b * SEQ_STEPS; i < (b + 1) * SEQ_STEPS; i++) {
+            unsigned char *f[2] = {&p->bass.fix[i], &p->mjam.fix[i]};
+            for (int k = 0; k < 2; k++)
+                if (on[k] && *f[k] >= 1 && *f[k] <= 127) {   /* a MIDI note; picks, MJ_FIX_REST, MJ_FIX_HOLD stay */
+                    any = 1;
+                    if (apply) *f[k] = 0;
+                }
+            any |= on[1] && p->mjam.fland[b][i % SEQ_STEPS] != 0;
+        }
+        any |= ((on[0] ? p->bass.nlock : 0) | (on[1] ? p->mjam.nlock : 0)) >> b & 1;
+        if (!apply) continue;
+        if (on[0]) p->bass.nlock = (unsigned short)(p->bass.nlock & ~(1u << b));
+        if (!on[1]) continue;
+        p->mjam.nlock = (unsigned short)(p->mjam.nlock & ~(1u << b));
+        memset(p->mjam.fland[b], 0, SEQ_STEPS);   /* as seq_medit_lock's unkeep */
+    }
+    return any;
+}
+
+int seq_follow_part(seq_part_t *p, unsigned mask) { return follow_bars(p, mask, FOLLOW_BOTH, 1); }
+
+/* The bars of mask of the playing part p follow the chords on the Bass and the Melody, after their undo snapshots; 0 (no snapshot) when nothing
+ * changes. The caller renders */
+static int follow_push(seq_t *s, seq_part_t *p, unsigned mask, int join) {
+    if (!follow_bars(p, mask, FOLLOW_BOTH, 0)) return 0;
+    push_snap(s, LANE_BASS, join != 0);   /* joined to the chord verb's step: one Undo undoes both (join 0: a step of its own). Plain */
+    push_snap(s, LANE_MEL_UP, 1);         /* snapshots: bass_back and mjam_back bring the fixes, locks, frozen settings and fland back,
+                                           * never a knob turned since */
+    follow_bars(p, mask, FOLLOW_BOTH, 1);
+    return 1;
+}
+
+void seq_follow_chords(seq_t *s, unsigned mask, int join) {
+    seq_part_t *p = cur(s);
+    if (!follow_push(s, p, mask, join)) return;
+    act(s);   /* after the snapshots and the follow, which never read or set what it clears */
+    regen_harmony(s, p);
+}
+
+/* Try and keep (iOS): the lane view, on a scratch copy. Called by the iOS host only, on the main thread */
+
+static void emit_none(void *ctx, int status, int note, int vel, int frame) { (void)ctx, (void)status, (void)note, (void)vel, (void)frame; }
+
+void seq_scratch_from(seq_t *scratch, const seq_t *from) {
+    memcpy(scratch, from, sizeof *scratch);
+    scratch->emit = emit_none, scratch->ctx = NULL;
+    scratch->step_fn = NULL, scratch->step_ctx = NULL;
+}
+
+/* The slot part p has at step t: in the loop the one it plays (slot_at), in a bar a shrink hid its hidden slot (a grow brings it back as it was),
+ * past those the loop's again */
+static int carry_slot(const seq_part_t *p, int t) {
+    int k = t / p->chord_len;
+    return t >= p->bars * SEQ_STEPS && t < p->filled * SEQ_STEPS && k < p->filled_slots ? k : slot_at(p, 0, t);
+}
+
+/* The per-chord fields of `lane` (the Bass's tone, the Melody's pick and its octave) from src onto the n real slots of chord_len steps in fs (a
+ * part's chords) by time step: each slot takes src's where it starts (carry_slot; none on a change point's chord, which has no fields), so an edit
+ * stays on the chord at its time when the chords moved */
+static void fs_carry(seq_feel_slot_t *fs, int n, int chord_len, const seq_part_t *src, int lane) {
+    static const seq_feel_slot_t NONE;
+    for (int k = 0; k < n; k++) {
+        int sl = carry_slot(src, k * chord_len);
+        const seq_feel_slot_t *f = sl < SEQ_MAX_PROG ? &src->fs[sl] : &NONE;
+        if (lane == LANE_BASS) fs[k].tone = f->tone;
+        else fs[k].mtone = f->mtone, fs[k].moct = f->moct;
+    }
+}
+
+/* Lane `lane`'s own fields, src's into dst over dst's chords (seq_core.h, seq_lane_view; the one list the view and Go back read): its lane but its
+ * mute (a performance setting), SHAPE row; a drawn lane's bars, RHYTHM knobs, LOCK WITH (the other lane OWN when this one follows it, as
+ * seq_set_lockwith: one follows the other at most), ANTICIPATE and JAM block (c, l: the JAM knobs stay); the Chords' hit octaves; the Bass's notes;
+ * the Melody's notes and recipe knobs (Length); the Bass's and the Melody's per-chord fields by time step (fs_carry). The harmony is no lane's */
+static void lane_fields_copy(seq_part_t *dst, const seq_part_t *src, int lane) {
+    int d = dl_of(lane);
+    unsigned char mute = dst->lane[lane].mute;
+    dst->lane[lane] = src->lane[lane];
+    dst->lane[lane].mute = mute;
+    memcpy(dst->lane_shape[lane], src->lane_shape[lane], sizeof dst->lane_shape[lane]);
+    if (d >= 0) {
+        memcpy(dst->rb[d], src->rb[d], sizeof dst->rb[d]);
+        memcpy(dst->rk[d], src->rk[d], sizeof dst->rk[d]);
+        dst->lw[d] = src->lw[d], dst->an[d] = src->an[d];
+        if (dst->lw[d] != LW_OWN) dst->lw[DL_COUNT - 1 - d] = LW_OWN;
+        dst->djam[d].c = src->djam[d].c, dst->djam[d].l = src->djam[d].l;
+    }
+    if (lane == LANE_CHORDS) memcpy(dst->hoct, src->hoct, sizeof dst->hoct);
+    if (lane == LANE_BASS) dst->bass = src->bass;
+    if (lane == LANE_MEL_UP) {
+        dst->mjam = src->mjam;
+        memcpy(dst->mel.kn, src->mel.kn, sizeof dst->mel.kn);
+    }
+    /* bars src never filled repeat its loop, locks, drawn bars and notes too, as seq_set_bars's grow put them */
+    repeat_bars(&dst->lane[lane], src->filled, dst->bars, src->bars);
+    if (d >= 0) repeat_rbars(dst, lane, src->filled, dst->bars, src->bars);
+    if (jam_lane(dst, lane)) mel_repeat(dst, src->filled, dst->bars, src->bars);
+    if (lane != LANE_CHORDS) fs_carry(dst->fs, dst->prog_len, dst->chord_len, src, lane);
+}
+
+/* A scratch part's JAM Melody rendered with the pure renders (never render_mel: no queue, no djq or mj_next) */
+static void view_mel(const seq_t *scratch, seq_part_t *p) {
+    mel_harm_t h;
+    int g = 0;
+    mel_harm(scratch, p, &h);
+    render_mel_into(scratch, p, &h, &p->mjam.set, p->mline, p->lane[LANE_MEL_UP].steps, &g);
+    p->mjam.grid16 = (unsigned char)g;
+}
+
+/* A lane Try and keep acts on: LANE_CHORDS, LANE_BASS or LANE_MEL_UP */
+static int try_lane_ok(int lane) { return lane == LANE_CHORDS || lane == LANE_BASS || lane == LANE_MEL_UP; }
+
+void seq_lane_view(seq_t *scratch, int lane, const seq_part_t *lane_from, const seq_part_t *chords_from) {
+    seq_part_t *p = cur(scratch);
+    int n;
+    if (!try_lane_ok(lane)) return;
+    *p = *chords_from;   /* the whole part: a reused scratch keeps nothing from the view before */
+    lane_fields_copy(p, lane_from, lane);
+    p->filled = p->bars;   /* the loop alone: the bars a shrink hid never play */
+    n = p->bars * SEQ_STEPS;
+    revoice(scratch, p);
+    if (lane != LANE_MEL_UP) {
+        bass_key_t k = bass_key(scratch);
+        lane_bars(scratch, p, lane, (1u << p->filled) - 1, &k);
+    } else if (mel_jam(p))
+        view_mel(scratch, p);
+    memset(&p->lane[lane].steps[n], 0, sizeof p->lane[lane].steps[0] * (size_t)(SEQ_LANE_STEPS - n));
+    memset(&p->mline[n], 0, sizeof p->mline[0] * (size_t)(SEQ_LANE_STEPS - n));
+}
+
+void seq_mel_view_answer(seq_t *scratch, int ans) {
+    seq_part_t *p = cur(scratch);
+    if (ans < 0 || ans >= MA_COUNT || !mel_jam(p)) return;
+    mel_answer_put(&p->mjam.set, ans);
+    view_mel(scratch, p);
+}
+
+/* Try and keep (iOS): Go back. Called by the iOS host only, as a setter */
+
+/* Go back's undo step on the playing part: lane's snapshot whose Undo brings its settings back too (knobs 2: the complexity, SHAPE row and RHYTHM
+ * knobs, the Melody's settings; the Bass's note settings, bkeep) and the progression with them (prog_too: the per-chord tones and picks); on
+ * Chords the voicing and the loop's length too */
+static void back_snap(seq_t *s, int lane) {
+    seq_snap_t *u;
+    push_undo(s, lane);
+    u = &s->undo[(s->undo_top + SEQ_UNDO - 1) % SEQ_UNDO];
+    u->knobs = 2;
+    u->prog_too = lane == LANE_CHORDS ? 2 : 1;
+    if (lane == LANE_BASS) u->bkeep = BKEEP_PO | BKEEP_KNOBS;
+    if (lane == LANE_CHORDS) u->vox = 1, vox_read(cur(s), u->vx);
+}
+
+/* The Chords' harmony, src's into dst (restore_prog's list and the voicing; Feel's slots whole: the caller sets the Bass's tones and the Melody's
+ * picks), the voices and labels too (revoice makes them again where the loop reads them) */
+static void harmony_copy(seq_part_t *dst, const seq_part_t *src) {
+    memcpy(dst->prog, src->prog, sizeof dst->prog);
+    memcpy(dst->src, src->src, sizeof dst->src);
+    memcpy(dst->colour, src->colour, sizeof dst->colour);
+    memcpy(dst->cp, src->cp, sizeof dst->cp);
+    memcpy(dst->fs, src->fs, sizeof dst->fs);
+    dst->rc = src->rc, dst->feel_spans = src->feel_spans;
+    dst->chord_len = src->chord_len, dst->prog_len = src->prog_len, dst->filled_slots = src->filled_slots;
+    dst->phrase = src->phrase, dst->rank_len = src->rank_len, dst->slot_lock = src->slot_lock, dst->harmony_seed = src->harmony_seed;
+    dst->vstyle = src->vstyle, dst->vmode = src->vmode, dst->vcol = src->vcol, dst->vinv = src->vinv, dst->vspr = src->vspr;
+    dst->vstrdir = src->vstrdir, dst->voicing = src->voicing;
+    memcpy(dst->voice, src->voice, sizeof dst->voice);
+    memcpy(dst->voice_n, src->voice_n, sizeof dst->voice_n);
+    memcpy(dst->slot_text, src->slot_text, sizeof dst->slot_text);
+    memcpy(dst->slot_num, src->slot_num, sizeof dst->slot_num);
+}
+
+/* Go back on Chords undoes its cascade: in the bars of mask (whose chord differs between the start and now), lane's (LANE_BASS, LANE_MEL_UP) absolute
+ * fixed notes and kept bars (with their frozen settings and tones or picks) the start had, where p has none (apply 0: only says whether any would
+ * come back) */
+static int back_kept(seq_part_t *p, const seq_part_t *start, int lane, unsigned mask, int apply) {
+    int bass = lane == LANE_BASS, any = 0;
+    unsigned char *fix = bass ? p->bass.fix : p->mjam.fix;
+    const unsigned char *was = bass ? start->bass.fix : start->mjam.fix;
+    unsigned short *nlock = bass ? &p->bass.nlock : &p->mjam.nlock;
+    unsigned kept = (bass ? start->bass.nlock : start->mjam.nlock) & ~(unsigned)*nlock & mask;
+    for (int i = 0; i < SEQ_LANE_STEPS; i++)
+        if (mask >> (i / SEQ_STEPS) & 1 && !fix[i] && was[i] >= 1 && was[i] <= 127) {
+            any = 1;
+            if (apply) fix[i] = was[i];
+        }
+    if (!apply) return any || kept;
+    for (int b = 0; b < SEQ_MAX_BARS; b++) {
+        if (!(kept >> b & 1)) continue;
+        *nlock = (unsigned short)(*nlock | 1u << b);
+        if (bass) p->bass.frozen[b] = start->bass.frozen[b], memcpy(p->bass.ftone[b], start->bass.ftone[b], sizeof p->bass.ftone[b]);
+        else p->mjam.frozen[b] = start->mjam.frozen[b], memcpy(p->mjam.fland[b], start->mjam.fland[b], sizeof p->mjam.fland[b]);
+    }
+    return any || kept;
+}
+
+/* Go back on Chords (seq_core.h): the Bass's tones and the Melody's picks now has carried by time step onto the start's chords; in a bar whose chord
+ * changed since the start (every bar with all_picks), the start's where now has none. The Bass and the Melody joined to the step when their notes
+ * come back (plain snapshots, as the cascade's) */
+static void chords_back(seq_t *s, seq_part_t *p, const seq_part_t *start, int all_picks) {
+    seq_feel_slot_t now[SEQ_MAX_PROG];
+    unsigned mask = seq_chords_diff(s, start, p, start->bars);
+    int bass, mel;
+    bass = back_kept(p, start, LANE_BASS, mask, 0), mel = back_kept(p, start, LANE_MEL_UP, mask, 0);
+    memset(now, 0, sizeof now);
+    fs_carry(now, start->prog_len, start->chord_len, p, LANE_BASS);
+    fs_carry(now, start->prog_len, start->chord_len, p, LANE_MEL_UP);
+    back_snap(s, LANE_CHORDS);
+    if (bass) push_snap(s, LANE_BASS, 1);
+    if (mel) push_snap(s, LANE_MEL_UP, 1);
+    if (start->bars != p->bars) bars_set(s, p, start->bars);
+    harmony_copy(p, start);
+    for (int k = 0; k < p->prog_len; k++) {
+        int changed = all_picks || (mask >> (k * p->chord_len / SEQ_STEPS) & 1);   /* the bar where the slot starts */
+        if (!changed || now[k].tone) p->fs[k].tone = now[k].tone;
+        if (!changed || now[k].mtone) p->fs[k].mtone = now[k].mtone, p->fs[k].moct = now[k].moct;
+    }
+    for (int b = start->filled; b < p->filled; b++) memcpy(p->cp[b], p->cp[b % p->bars], sizeof p->cp[b]);   /* as restore_prog */
+    lane_fields_copy(p, start, LANE_CHORDS);
+    back_kept(p, start, LANE_BASS, mask, 1);
+    back_kept(p, start, LANE_MEL_UP, mask, 1);
+    strip_clamp(s);
+    revoice(s, p);
+    regen_part(s, p);
+    arr_clamp(s);
+}
+
+/* Go back on Bass or Melody (seq_core.h): then "chords lead" on that lane alone where the chord moved since the start. The other drawn lane
+ * renders too when its LOCK WITH changed (as restore_lane) */
+static void lane_back(seq_t *s, seq_part_t *p, int lane, const seq_part_t *start) {
+    int d = dl_of(lane), o = DL_COUNT - 1 - d, olw = d >= 0 ? p->lw[o] : 0;
+    unsigned mask = seq_chords_diff(s, start, p, p->bars);   /* before the lane's fields come back */
+    back_snap(s, lane);
+    lane_fields_copy(p, start, lane);
+    follow_bars(p, mask, 1u << lane, 1);
+    if (d >= 0 && p->lw[o] != olw && both_drawn(p))
+        render_pair(s, p, p->lw[d] != LW_OWN ? o : d);
+    else {
+        regen_lane(s, p, lane);
+        if (d >= 0 && p->lw[o] != olw && lane_drawn(p, DLANE[o].lane)) render_rhythm(s, p, DLANE[o].lane);
+    }
+}
+
+/* Go back's and Start over's start on lane `lane` of the playing part: a setter's, and a queued JAM block on the lane goes, its tap's undo step
+ * with it */
+static void lane_edit_begin(seq_t *s, int lane) {
+    int d = dl_of(lane);
+    seq_txn_done(s);
+    act(s);
+    if (d >= 0 && s->djq[d].part == s->cur_part) djq_cancel(s, d);
+    if (lane == LANE_MEL_UP && s->mjq_part == s->cur_part) s->mjq_c = -1;
+}
+
+void seq_lane_back(seq_t *s, int lane, const seq_part_t *start, int all_picks) {
+    if (!start || !try_lane_ok(lane)) return;
+    lane_edit_begin(s, lane);
+    if (lane == LANE_CHORDS) chords_back(s, cur(s), start, all_picks);
+    else lane_back(s, cur(s), lane, start);
+}
+
+/* Try and keep (iOS): Start over. Called by the iOS host only, as a setter */
+
+/* Drawn lane `lane` (Chords or Bass; its note locks cleared first) of p back to its JAM block on every bar of the loop, kept and painted bars
+ * too (no block: library rhythm `rhythm`, LOCK WITH OWN; the caller sets the voicing or the notes); its RHYTHM knobs, NEW BAR versions, Busy,
+ * Lean and Early neutral (the caller renders) */
+static void drawn_start_over(seq_part_t *p, int lane, int rhythm) {
+    int d = dl_of(lane);
+    for (int b = 0; b < SEQ_MAX_BARS; b++) p->rb[d][b].lock = p->rb[d][b].ed = 0;   /* jam_apply_part then takes every bar */
+    if (p->djam[d].c >= 0) jam_apply_part(p, d, p->djam[d].c, p->djam[d].l);   /* LOCK WITH OWN too */
+    else rbars_init(p, lane, rhythm), p->lw[d] = LW_OWN;
+    memset(p->rk[d], 0, sizeof p->rk[d]);
+    memset(p->lane[lane].bar_var, 0, sizeof p->lane[lane].bar_var);
+    p->lane[lane].gen.complexity = lane == LANE_BASS ? BASS_CX_NEUTRAL : CHORDS_CX_NEUTRAL;
+    p->lane_shape[lane][L_PUSH[lane]] = LSHAPE_NEUTRAL[lane][L_PUSH[lane]];
+    p->an[d] = AN_OFF;
+}
+
+/* Start over on Chords (seq_core.h): the loop the progression's length, then the Bass and the Melody follow the new chords where they changed
+ * (as seq_follow_chords, joined to the step) */
+static void chords_start_over(seq_t *s, seq_part_t *p, int preset) {
+    unsigned short was[SEQ_LANE_STEPS], now[SEQ_LANE_STEPS];   /* the chords before and after (seq_chords_diff would need a part copy) */
+    const int *n = LSHAPE_NEUTRAL[LANE_CHORDS];
+    int bars = 1;
+    while (bars < THEORY_PRESETS[preset].len) bars *= 2;   /* as seq_feel_preset's loop, which may shrink here */
+    back_snap(s, LANE_CHORDS);
+    if (bars != p->bars) bars_set(s, p, bars), revoice(s, p);
+    seq_chord_steps(s, p, was);
+    feel_preset_set(s, p, preset);
+    feel_hands_clear(p);
+    if (p->djam[DL_CHORDS].c < 0) part_style(p, VOICING_DEFAULT);
+    drawn_start_over(p, LANE_CHORDS, RHYTHM_PULSE);
+    memset(p->hoct, 0, sizeof p->hoct);
+    p->lane_shape[LANE_CHORDS][SHAPE_GATE] = n[SHAPE_GATE];   /* the Phrasing rows as RHYTHM's RESET KNOBS */
+    p->lane_shape[LANE_CHORDS][SHAPE_DYN] = n[SHAPE_DYN];
+    revoice(s, p);
+    seq_chord_steps(s, p, now);
+    follow_push(s, p, seq_chords_changed(was, now, p->bars), 1);
+    strip_clamp(s);
+    regen_part(s, p);
+    arr_clamp(s);
+}
+
+/* Start over on Bass (seq_core.h) */
+static void bass_start_over(seq_t *s, seq_part_t *p) {
+    p->bass.nlock = 0;
+    memset(p->bass.frozen, 0, sizeof p->bass.frozen);
+    memset(p->bass.ftone, 0, sizeof p->bass.ftone);
+    memset(p->bass.fix, 0, sizeof p->bass.fix);
+    if (p->djam[DL_BASS].c < 0) p->bass.set = bass_style_set(BASS_POP_ROOT);   /* no block: a new instance's notes */
+    drawn_start_over(p, LANE_BASS, 0);
+    tones_gone(p);
+    render_rhythm(s, p, LANE_BASS);
+}
+
+/* Start over on Melody (seq_core.h); a lane not JAM is made JAM first, as mel_jam_now */
+static void mel_start_over(seq_t *s, seq_part_t *p) {
+    seq_lane_t *ln = &p->lane[LANE_MEL_UP];
+    int jam = mel_jam(p), c = p->mjam.set.c, l = p->mjam.set.l, sw = p->mjam.sw;
+    mjam_init(&p->mjam);   /* mjam_default's settings (cadc 0), nothing kept or fixed, push, dyn, swing, accent, Early and Loose as new */
+    if (jam) p->mjam.set.c = (signed char)c, p->mjam.set.l = (signed char)l, p->mjam.sw = (unsigned char)sw;   /* the block stays */
+    else {
+        unsigned char mute = ln->mute;
+        memset(ln, 0, sizeof *ln);
+        ln->mute = mute;
+        jam_default(p);
+    }
+    p->mel.kn[MK_GATE] = 50;
+    memset(ln->bar_var, 0, sizeof ln->bar_var);
+    ln->gen.complexity = mel_block_cx(p->mjam.set.l);
+    for (int i = 0; i < SEQ_MAX_PROG; i++) p->fs[i].mtone = 0, p->fs[i].moct = 0;
+    regen_lane(s, p, LANE_MEL_UP);
+}
+
+void seq_lane_start_over(seq_t *s, int lane, int preset) {
+    seq_part_t *p = cur(s);
+    if (!try_lane_ok(lane) || (lane == LANE_CHORDS && (preset < 0 || preset >= THEORY_NPRESETS))) return;
+    if (dl_of(lane) >= 0 && !lane_drawn(p, lane)) return;
+    lane_edit_begin(s, lane);
+    if (lane == LANE_CHORDS) chords_start_over(s, p, preset);
+    else {
+        back_snap(s, lane);
+        if (lane == LANE_BASS) bass_start_over(s, p);
+        else mel_start_over(s, p);
+    }
 }

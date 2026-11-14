@@ -44,7 +44,16 @@ static int cat5(char *buf, int len, const char *a, const char *b, const char *c,
 static int cat4(char *buf, int len, const char *a, const char *b, const char *c, const char *d) { return cat5(buf, len, a, b, c, d, NULL); }
 static int cat2(char *buf, int len, const char *a, const char *b) { return cat5(buf, len, a, b, NULL, NULL, NULL); }
 
-int theory_degree_pc(int key, int scale, int deg) { return (key + SCALE[scale][pmod(deg, 7)]) % 12; }
+/* 0.28 the chromatic chords' scales (theory_chroma_src), from their root: major, minor, dominant, diminished */
+static const int CHROMA[CQ_COUNT][7] = {{0, 2, 4, 5, 7, 9, 11}, {0, 2, 3, 5, 7, 8, 10}, {0, 2, 4, 5, 7, 9, 10}, {0, 2, 3, 5, 6, 8, 9}};
+
+int theory_degree_pc(int key, int scale, int deg) {
+    if (scale >= SCALE_COUNT) {   /* a chromatic chord's: theory_slot_scale */
+        int v = scale - SCALE_COUNT;
+        return (key + v / CQ_COUNT + CHROMA[v % CQ_COUNT][pmod(deg, 7)]) % 12;
+    }
+    return (key + SCALE[scale][pmod(deg, 7)]) % 12;
+}
 
 int theory_tone_note(int key, int scale, int deg, int tone, int octave) {
     int k = tone - 1, root = theory_degree_pc(key, scale, deg);
@@ -53,7 +62,7 @@ int theory_tone_note(int key, int scale, int deg, int tone, int octave) {
 }
 
 /* the triad quality: 0 major, 1 minor, 2 diminished, 3 augmented */
-static int triad_quality(int key, int scale, int deg) {
+int theory_triad_quality(int key, int scale, int deg) {
     int root = theory_degree_pc(key, scale, deg);
     int third = pmod(theory_degree_pc(key, scale, deg + 2) - root, 12);
     int fifth = pmod(theory_degree_pc(key, scale, deg + 4) - root, 12);
@@ -62,7 +71,7 @@ static int triad_quality(int key, int scale, int deg) {
 
 int theory_chord_name(int key, int scale, int deg, char *buf, int len) {
     static const char *const QUALITY[4] = {"", "m", "dim", "+"};
-    return cat2(buf, len, NOTE[theory_degree_pc(key, scale, deg)], QUALITY[triad_quality(key, scale, deg)]);
+    return cat2(buf, len, NOTE[theory_degree_pc(key, scale, deg)], QUALITY[theory_triad_quality(key, scale, deg)]);
 }
 
 int theory_note_name(int note, char *buf, int len) {
@@ -120,8 +129,11 @@ static const unsigned char BORROW[SCALE_COUNT][THEORY_NBORROW][2] = {
     {{SCALE_MAJOR, 3}, {SCALE_PHRYGIAN, 1}, {SCALE_MINOR, 6}}};   /* Harm. minor: IV bII bVII */
 
 int theory_borrow_scale(int scale, int b) { return BORROW[scale][b - 1][0]; }
-int theory_borrow_degree(int scale, int b) { return BORROW[scale][b - 1][1]; }
-int theory_slot_scale(int scale, int src) { return src ? theory_borrow_scale(scale, src) : scale; }
+int theory_borrow_degree(int scale, int b) { return b > THEORY_NBORROW ? 0 : BORROW[scale][b - 1][1]; }   /* 0.28 a chromatic chord: degree 0 */
+int theory_slot_scale(int scale, int src) {
+    return src >= THEORY_SRC_CHROMA ? SCALE_COUNT + src - THEORY_SRC_CHROMA : src ? theory_borrow_scale(scale, src) : scale;
+}
+int theory_chroma_src(int root, int quality) { return THEORY_SRC_CHROMA + pmod(root, 12) * CQ_COUNT + quality; }
 
 int theory_colour_tone(int colour, int tone) {
     if (tone != TONE_3) return tone;
@@ -157,7 +169,7 @@ int theory_chord_name_c(int key, int scale, int deg, int colour, char *buf, int 
         n = theory_chord_name(key, scale, deg, buf, len);
         return (colour == COL_ADD9 || colour == COL_6TH) && n < len ? n + cat2(buf + n, len - n, colour == COL_6TH ? "6" : "add9", NULL) : n;
     }
-    q = triad_quality(key, scale, deg);
+    q = theory_triad_quality(key, scale, deg);
     sev = pmod(theory_degree_pc(key, scale, deg + 6) - root, 12);   /* 9, 10 or 11 in every scale here */
     if (is_ext(colour))   /* the 7th's name with its 7 replaced: Em9, Cmaj13, D11, F#m9b5 */
         return cat4(buf, len, NOTE[root], XPRE[q][q == 2 ? sev == 10 : sev == 11], EXT_NUM[colour], q == 2 && sev == 10 ? "b5" : "");
@@ -168,8 +180,20 @@ int theory_chord_name_c(int key, int scale, int deg, int colour, char *buf, int 
 int theory_numeral(int key, int scale, int slot_scale, int deg, char *buf, int len) {
     static const char *const UP[7] = {"I", "II", "III", "IV", "V", "VI", "VII"};
     static const char *const LO[7] = {"i", "ii", "iii", "iv", "v", "vi", "vii"};
-    int d = pmod(deg, 7), q = triad_quality(key, slot_scale, d);
+    int d = pmod(deg, 7), q = theory_triad_quality(key, slot_scale, d);
     int diff = pmod(theory_degree_pc(key, slot_scale, d) - theory_degree_pc(key, scale, d), 12);
+    if (slot_scale >= SCALE_COUNT) {   /* 0.28 a chromatic chord: the project degree its root is, else the one a semitone from it */
+        int root = theory_degree_pc(key, slot_scale, deg), up = -1, down = -1;
+        d = -1;
+        for (int i = 6; i >= 0; i--) {
+            int pc = theory_degree_pc(key, scale, i);
+            if (pc == root) d = i;
+            if (pc == (root + 1) % 12) up = i;     /* its flat */
+            if ((pc + 1) % 12 == root) down = i;   /* its sharp */
+        }
+        diff = d >= 0 ? 0 : up >= 0 ? 11 : 1;
+        d = d >= 0 ? d : up >= 0 ? up : down >= 0 ? down : 0;
+    }
     return cat4(buf, len, diff == 11 ? "b" : diff == 1 ? "#" : "", q == 0 || q == 3 ? UP[d] : LO[d], q == 2 ? THEORY_DIM : q == 3 ? "+" : "",
                 NULL);
 }
@@ -189,7 +213,7 @@ int theory_degree_c(int key, int scale, int slot_scale, int deg, int colour, cha
     static const char *const SEV[4][2] = {{"7", "maj7"}, {"7", "maj7"}, {THEORY_DIM "7", "m7b5"}, {"+7", "+maj7"}};
     char num[12];
     static const char *const XPRE[4][2] = {{"", "maj"}, {"", "maj"}, {THEORY_DIM, "m"}, {"+", "+maj"}};   /* SEV's, before the number */
-    int d = pmod(deg, 7), q = triad_quality(key, slot_scale, d), n = theory_numeral(key, scale, slot_scale, d, num, sizeof num);
+    int d = pmod(deg, 7), q = theory_triad_quality(key, slot_scale, d), n = theory_numeral(key, scale, slot_scale, d, num, sizeof num);
     if (colour == COL_TRIAD || colour >= COL_COUNT || colour < 0) return cat2(buf, len, num, NULL);
     if (colour == COL_POWER || colour == COL_6TH) return cat2(buf, len, num, colour == COL_POWER ? "5" : "6");   /* "i5", "IV6" */
     if (colour != COL_7TH && !is_ext(colour)) return cat4(buf, len, num, " ", THEORY_COLOUR_NAME[colour], NULL);   /* "vi\xC2\xB0 sus4", "IV add9" */
@@ -203,7 +227,7 @@ int theory_degree_c(int key, int scale, int slot_scale, int deg, int colour, cha
 /* NAMES on: the name with a compact suffix, as 0.12 */
 static int name_card(int key, int slot_scale, int d, int colour, char *buf, int len) {
     char base[16];
-    int q = triad_quality(key, slot_scale, d), root = theory_degree_pc(key, slot_scale, d);
+    int q = theory_triad_quality(key, slot_scale, d), root = theory_degree_pc(key, slot_scale, d);
     theory_chord_name(key, slot_scale, d, base, sizeof base);
     if (colour <= COL_TRIAD || colour >= COL_COUNT) return cat2(buf, len, base, NULL);
     if (colour == COL_ADD9) return cat2(buf, len, base, "9");   /* 9: add9 on a card */
@@ -281,7 +305,7 @@ int theory_drift(int key, int scale, int slot_scale, int deg, int colour, int cl
     static const unsigned char COST[COL_COUNT] = {0, 10, 12, 12, 12, 0, 22, 38, 50, 12};   /* by colour */
     int score = 0, c = colour >= 0 && colour < COL_COUNT ? colour : COL_TRIAD;
     if (slot_scale != scale) score += 30;
-    if (triad_quality(key, slot_scale, deg) == 2) score += 15;
+    if (theory_triad_quality(key, slot_scale, deg) == 2) score += 15;
     score += COST[c];
     if (theory_avoid(key, scale, slot_scale, deg, c)) score += 20;
     if (cluster) score += 22;

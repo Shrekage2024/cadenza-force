@@ -16,7 +16,7 @@ static int fails;
 #define MEL_SWEEP_V_FNV 0xcace6f93u
 
 /* E minor, the loop Em C G D at 1-bar chords (the reference's CH) */
-static const mjam_chord_t EM_CH[4] = {{4, 7, 11}, {0, 4, 7}, {7, 11, 2}, {2, 6, 9}};
+static const mjam_chord_t EM_CH[4] = {{4, 7, 11, {0}}, {0, 4, 7, {0}}, {7, 11, 2, {0}}, {2, 6, 9, {0}}};
 static mjam_bar_in_t EM_BAR[4];
 
 static void em_init(void) {
@@ -29,7 +29,7 @@ static void em_init(void) {
 
 static mjam_set_t mk(int c, int l, int form, int breath, int cad, int fill, int ans, int stray, int aoct, int reg) {
     mjam_set_t s = {(signed char)c, (signed char)l, (signed char)form, (signed char)breath, (signed char)cad, (signed char)fill,
-                    (signed char)ans, (signed char)stray, (signed char)aoct, (signed char)reg, 4, 2, 0, 0, 0, 0};
+                    (signed char)ans, (signed char)stray, (signed char)aoct, (signed char)reg, 4, 2, 0, 0, 0, 0, 0};
     return s;
 }
 
@@ -49,7 +49,7 @@ static int fold_ok(const mjam_note_t *ref, const mjam_note_t *out) {
 /* One reference bar into the hash (the JS hashBar); counts bars where the fold breaks fold_ok */
 static unsigned hash_bar(unsigned h, mjam_set_t set, int b, int v, int *fold_bad) {
     unsigned char vv[4] = {(unsigned char)v, (unsigned char)v, (unsigned char)v, (unsigned char)v};
-    mjam_loop_in_t in = {4, SCALE_MINOR, 4, set, EM_BAR, vv};
+    mjam_loop_in_t in = {4, SCALE_MINOR, 4, set, EM_BAR, vv, NULL};
     mjam_note_t ref[SEQ_STEPS], out[SEQ_STEPS];
     mjam_bar_ref(&in, b, &set, ref);
     mjam_bar(&in, b, &set, out);
@@ -131,7 +131,7 @@ static void test_20_spots(void) {
          "C4 - C5 - E4 - C5 - G4 - B4 - C4 D4 E4 F#4 | dots 11,63,31,67,16,64,31,67,21,65,28,66,11,12,16,23 | score 31"}};
     for (int k = 0; k < 7; k++) {
         mjam_set_t s = mk(SPOT[k].c, SPOT[k].l, SPOT[k].form, SPOT[k].breath, SPOT[k].cad, SPOT[k].fill, SPOT[k].ans, SPOT[k].stray, 0, 1);
-        mjam_loop_in_t in = {4, SCALE_MINOR, 4, s, EM_BAR, NULL};
+        mjam_loop_in_t in = {4, SCALE_MINOR, 4, s, EM_BAR, NULL, NULL};
         mjam_note_t line[SEQ_STEPS];
         char got[256];
         mjam_bar(&in, SPOT[k].b, &s, line);
@@ -159,7 +159,7 @@ static void other_key_bars(const mjam_bar_in_t *bar, int c, int l, ok_t *ok) {
     sets[0].c = (signed char)c;
     sets[0].l = (signed char)l;
     for (int k = 0; k < 6; k++) {
-        mjam_loop_in_t in = {bar[0].key, bar[0].scale, 4, sets[k], bar, V};
+        mjam_loop_in_t in = {bar[0].key, bar[0].scale, 4, sets[k], bar, V, NULL};
         for (int b = 0; b < 4; b++) {
             mjam_note_t line[SEQ_STEPS];
             mjam_bar(&in, b, &sets[k], line);
@@ -177,7 +177,7 @@ static void other_key_bars(const mjam_bar_in_t *bar, int c, int l, ok_t *ok) {
 /* the raw block c, l: chord-tone-slot-only blocks play only tones of the chord under each note; the pedal stays */
 static void other_key_blocks(const mjam_bar_in_t *bar, int c, int l, ok_t *ok) {
     int key = bar[0].key, slots_only = c == MJ_ARP || (c == MJ_OST && l <= 2) || (c == MJ_LEAD && l <= 2);
-    mjam_loop_in_t in = {key, bar[0].scale, 4, mjam_default(), bar, NULL};
+    mjam_loop_in_t in = {key, bar[0].scale, 4, mjam_default(), bar, NULL, NULL};
     for (int b = 0; b < 4; b++) {
         mjam_note_t line[SEQ_STEPS];
         mjam_block_bar(&in, c, l, b, line);
@@ -260,7 +260,7 @@ static void test_20_short_loops_model(void) {
         for (int c = 0; c < MJ_COLS; c++) for (int l = 0; l < MJ_LEVELS; l++) {
             for (int form = 0; form < MF_COUNT; form++) {
                 mjam_set_t s = mk(c, l, form, 2, 3, 1, MA_SWAP, 2, 1, 2);
-                mjam_loop_in_t in = {4, SCALE_MINOR, bars, s, bar, NULL};
+                mjam_loop_in_t in = {4, SCALE_MINOR, bars, s, bar, NULL, NULL};
                 for (int b = 0; b < bars; b++, n++) {
                     mjam_note_t line[SEQ_STEPS];
                     mjam_bar(&in, b, &s, line);
@@ -269,7 +269,7 @@ static void test_20_short_loops_model(void) {
             }
             mjam_set_t loop = mk(c, l, MF_LOOP, 0, 3, 0, MA_ECHO, 1, 0, 1), half = mk(c, l, MF_LOOP, 3, 0, 0, MA_ECHO, 1, 0, 1),
                        pick = mk(c, l, MF_LOOP, 0, 0, 1, MA_ECHO, 1, 0, 1);
-            mjam_loop_in_t in = {4, SCALE_MINOR, bars, loop, bar, NULL};
+            mjam_loop_in_t in = {4, SCALE_MINOR, bars, loop, bar, NULL, NULL};
             mjam_note_t line[SEQ_STEPS];
             for (int b = 0; b < bars; b++) {
                 if (b != bars - 1 && b % 4 != 3) continue;
@@ -342,7 +342,7 @@ static void test_20_default_and_roles(void) {
 }
 
 static void pictures(int frames[MJ_COLS * MJ_LEVELS][SEQ_STEPS]) {
-    mjam_loop_in_t in = {4, SCALE_MINOR, 4, mjam_default(), EM_BAR, NULL};
+    mjam_loop_in_t in = {4, SCALE_MINOR, 4, mjam_default(), EM_BAR, NULL, NULL};
     for (int c = 0; c < MJ_COLS; c++)
         for (int l = 0; l < MJ_LEVELS; l++) {
             mjam_note_t line[SEQ_STEPS];
@@ -377,7 +377,7 @@ static mjam_set_t k21(int c, int l, int dens, int rng, int var) {
 }
 
 static void bar21(mjam_set_t s, int b, mjam_note_t out[SEQ_STEPS]) {
-    mjam_loop_in_t in = {4, SCALE_MINOR, 4, s, EM_BAR, NULL};
+    mjam_loop_in_t in = {4, SCALE_MINOR, 4, s, EM_BAR, NULL, NULL};
     mjam_bar(&in, b, &s, out);
 }
 
@@ -554,7 +554,7 @@ static void test_21_fill_targets_played_note(void) {
 static void test_21_swing16(void) {
     static const mjam_set_t EMPTY;
     mjam_set_t up = k21(MJ_ARP, 0, 0, 0, 0), alb = k21(MJ_ARP, 3, 0, 0, 0), run = up, dens = k21(MJ_ARP, 0, 1, 0, 0);
-    mjam_loop_in_t in = {4, SCALE_MINOR, 4, EMPTY, EM_BAR, NULL};
+    mjam_loop_in_t in = {4, SCALE_MINOR, 4, EMPTY, EM_BAR, NULL, NULL};
     int got[4];
     run.fill = 3;
     run.form = MF_1_1;
@@ -621,7 +621,7 @@ static void test_21_bar_odd(void) {
     int bad = 0, n = 0;
     for (int c = 0; c < MJ_COLS; c++) for (int l = 0; l < MJ_LEVELS; l++) for (int d = -2; d <= 2; d++) for (int f = 0; f <= 3; f += 3) {
         mjam_set_t s = k21(c, l, d, 0, 0);
-        mjam_loop_in_t in = {4, SCALE_MINOR, 4, s, EM_BAR, NULL};
+        mjam_loop_in_t in = {4, SCALE_MINOR, 4, s, EM_BAR, NULL, NULL};
         int any = 0;
         s.fill = (signed char)f;
         in.set = s;
@@ -663,7 +663,7 @@ static void test_21_time_half(void) {
     mjam_note_t n[SEQ_STEPS], h[SEQ_STEPS];
     mjam_bar_in_t split = EM_BAR[0];
     mjam_set_t s = t21(MJ_ARP, 0, -1);
-    mjam_loop_in_t in = {4, SCALE_MINOR, 1, s, &split, NULL};
+    mjam_loop_in_t in = {4, SCALE_MINOR, 1, s, &split, NULL, NULL};
     int ok = 1;
     bar21(t21(MJ_ARP, 0, 0), 0, n);
     bar21(s, 0, h);
@@ -686,7 +686,7 @@ static void test_21_time_half(void) {
  * Bar 4 (CADENCE HOME after TIME): the last note, step 16, lands on the tonic E */
 static void test_21_time_double(void) {
     mjam_note_t n[SEQ_STEPS], d[SEQ_STEPS];
-    mjam_loop_in_t in = {4, SCALE_MINOR, 4, t21(MJ_ARP, 0, 1), EM_BAR, NULL};
+    mjam_loop_in_t in = {4, SCALE_MINOR, 4, t21(MJ_ARP, 0, 1), EM_BAR, NULL, NULL};
     int ok = 1, g[3];
     bar21(t21(MJ_ARP, 0, 0), 0, n);
     bar21(t21(MJ_ARP, 0, 1), 0, d);

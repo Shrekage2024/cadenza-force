@@ -1,4 +1,4 @@
-# Cadenza 0.26.0 — The Manual
+# Cadenza 0.28.1 — The Manual
 
 Everything Cadenza does, every page, every control and every knob, in one place. Read it from the top the first time,
 then use it as a reference. The [cheat sheet](#22-cheat-sheet) at the end puts it all on one page.
@@ -23,12 +23,15 @@ walkthrough and the browser version.
 
 The colours on screen always mean the same lane: **amber** is Chords, **blue** is Bass, **green** is Melody.
 
-The screenshots were taken on a Force running Cadenza 0.26.0, playing the House 124 preset.
+The screenshots were taken on a Force running Cadenza 0.26.0, playing the House 124 preset. The pages are the same in
+0.28.
 
 ---
 
 ## Contents
 
+- [What's new in 0.28](#whats-new-in-028)
+- [What's new in 0.27](#whats-new-in-027)
 - [What's new in 0.26](#whats-new-in-026)
 
 1. [What Cadenza is](#1-what-cadenza-is)
@@ -58,6 +61,23 @@ Reference: [progressions](#a-progressions) · [scales and borrowed chords](#b-sc
 [voicing styles](#c-voicing-styles) · [bass styles](#d-bass-styles) · [rhythms](#e-rhythms)
 
 ---
+
+## What's new in 0.28
+
+**0.28.1: installs on MPC OS 3.10.1.** Nothing changes on the Force's screen. MPC OS 3.10.1 loads plugins officially, from a
+`VST2 Plugins` folder, and 0.28.1 comes ready for it: a folder you copy in, no SSH needed
+([Install](#2-install-upgrade-uninstall)). The installer for MPC OS 3.9.1 works as before. 0.28.1 is not yet tested on MPC OS 3.10.1.
+
+**0.28.0:** nothing changes on the Force's screen. 0.28.0 adds to the engine what the iOS app's new Feel page for Chords uses: chords on any root, even
+outside the key, muted chords, chords of different lengths, and notes placed by hand. A project made on the Force plays and saves exactly as
+in 0.27. A project made on iOS with these plays as it was made, and the chords show by name, but the Force has no screen to change them yet.
+
+## What's new in 0.27
+
+**Nothing changes on the Force's screen.** 0.27.0 and 0.27.1 add a song order to the engine: a list of rows, each a
+song part played for some passes with its own mutes. The iOS app's song page uses it; the Force has no song page yet.
+
+A project with no song order, which is every project made on the Force, plays and saves exactly as in 0.26.
 
 ## What's new in 0.26
 
@@ -91,22 +111,36 @@ It is built around three ideas:
 
 ## 2. Install, upgrade, uninstall
 
-You need:
+You need an **Akai Force** (first generation) with MPC OS 3.x. Cadenza is tested on a Force with MPC OS 3.9.1; MPC OS
+3.10.1 is not tested yet. It also installs on the other first-generation MPC OS devices (MPC Live, Live II, One, X,
+Key 37, Key 61), but they are untested. How you install depends on your MPC OS:
 
-- An **Akai Force** (first generation) with MPC OS 3.x. Cadenza is tested on a Force with MPC OS 3.9.1. The installer
-  also accepts the other first-generation MPC OS devices (MPC Live, Live II, One, X, Key 61), but they are untested.
-- **Root SSH access** to the device, which needs a modded unit (for example MockbaMod). Installing plugins this way is
-  unofficial: back up first, and use it at your own risk.
+- **MPC OS 3.10.1 or later:** copy a folder, below. Akai's plugin support is free and experimental, and Akai does not
+  support third-party plugins.
+- **MPC OS 3.9.1 or earlier:** run the installer over SSH, further down. It needs root SSH access, which needs a modded
+  unit (for example MockbaMod). Installing plugins this way is unofficial: back up first, and use it at your own risk.
 
-### Install
+### Install on MPC OS 3.10.1
 
-1. Download `Cadenza-0.26.0-mpc-armv7.zip` and unzip it on your computer.
+1. On the Force, open **Preferences › Enhancements** and turn on **Enable Enhancements** and **External Plugin Support**.
+2. Download `Cadenza-0.28.1-mpc-sdk.zip` and unzip it on your computer. It holds one folder, `Cadenza - VST - Cadenza`.
+3. Copy that folder into a folder named **`VST2 Plugins`** at the top of a drive the Force reads (an SD card or a USB
+   drive; make the `VST2 Plugins` folder if it isn't there).
+4. Restart the Force. Cadenza is under **External VST Plugins › Cadenza**.
+
+To upgrade, replace the folder with the new version's. To uninstall, delete it. If you had Cadenza installed before you
+updated to 3.10.1, copy the new folder in anyway: MPC OS 3.10.1 no longer lists plugins from the old place for new tracks.
+Projects that use Cadenza still load.
+
+### Install on MPC OS 3.9.1 or earlier
+
+1. Download `Cadenza-0.28.1-mpc-armv7.zip` and unzip it on your computer.
 2. **Save your project.** The installer stops MPC and starts it again.
 3. Copy the folder to the device and run the installer:
 
    ```
-   scp -r Cadenza-0.26.0 root@<device-ip>:/tmp/
-   ssh root@<device-ip> sh /tmp/Cadenza-0.26.0/install.sh
+   scp -r Cadenza-0.28.1 root@<device-ip>:/tmp/
+   ssh root@<device-ip> sh /tmp/Cadenza-0.28.1/install.sh
    ```
 
 The installer checks the device, stops MPC, copies the plugin folder to `/sdcard/Synths/Cadenza - VST - Cadenza/`,
@@ -125,7 +159,8 @@ Run the new version's installer the same way; it upgrades in place. Then:
 
 ### Uninstall
 
-`ssh root@<device-ip> sh /tmp/Cadenza-0.26.0/uninstall.sh` removes the plugin folder and its entry in the plugin list,
+On MPC OS 3.10.1, delete the `Cadenza - VST - Cadenza` folder from `VST2 Plugins`. On MPC OS 3.9.1,
+`ssh root@<device-ip> sh /tmp/Cadenza-0.28.1/uninstall.sh` removes the plugin folder and its entry in the plugin list,
 and restarts MPC. Projects that use Cadenza load without it.
 
 ---
@@ -136,7 +171,8 @@ Cadenza needs four things: itself on a track, three tracks to play, the MIDI rou
 
 ### Load Cadenza
 
-Make a plugin track, open **MENU › TRACK EDIT** and tap **PLUGIN**. Cadenza is under **VST › Cadenza**. Open its screen
+Make a plugin track, open **MENU › TRACK EDIT** and tap **PLUGIN**. Cadenza is under **VST › Cadenza** (on MPC OS 3.10.1,
+**External VST Plugins › Cadenza**). Open its screen
 with **SHIFT + CLIP**.
 
 ### Three tracks to play
