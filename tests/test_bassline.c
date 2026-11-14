@@ -12,7 +12,7 @@ static int fails;
 #define BASS_SWEEP_FNV 0xc46384cbu
 
 static const bass_key_t EMIN = {4, {4, 6, 7, 9, 11, 0, 2}};
-static const bass_chord_t CH[4] = {{4, 7, 1}, {0, 4, 0}, {7, 11, 0}, {2, 6, 0}};   /* Em C G D */
+static const bass_chord_t CH[4] = {{4, 7, 1, 0}, {0, 4, 0, 0}, {7, 11, 0, 0}, {2, 6, 0, 0}};   /* Em C G D */
 
 static unsigned fnv(unsigned h, int byte) { h ^= (unsigned)byte & 255u; return h * 16777619u; }
 
@@ -146,7 +146,7 @@ static void test_19_scale_steps(void) {
 }
 
 static void test_19_extremes(void) {
-    static const bass_chord_t F = {5, 9, 0};
+    static const bass_chord_t F = {5, 9, 0, 0};
     unsigned char codes[16], note[16], fix[16] = {0};
     char role[16];
     int ok = 1, ped_ok = 1;

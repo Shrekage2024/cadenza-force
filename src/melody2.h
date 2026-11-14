@@ -18,8 +18,8 @@ enum { MA_ECHO, MA_SHIFT, MA_MIRROR, MA_RHYTHM, MA_TAIL, MA_SWAP, MA_COUNT };
 /* c 0..5, l 0..4 the block; form 0..5; breath, cad, fill 0..3; ans 0..5; stray 0..3; aoct -1..1 (answers' octave);
  * reg 0..2 (Low, Middle, High); sc 0..5 / sl 0..4 the SWAP block. Out-of-range values are clamped.
  * 0.21 (0 = neutral, so a zeroed set sounds as 0.20): dens -2 SPARSE .. 2 BUSY, rng -1 NARROW .. 2 HUGE, var 0 OFF .. 3 ALL;
- * tm -1 HALF, 0 NORMAL, 1 DOUBLE (TIME, Amendment 1). */
-typedef struct { signed char c, l, form, breath, cad, fill, ans, stray, aoct, reg, sc, sl, dens, rng, var, tm; } mjam_set_t;
+ * tm -1 HALF, 0 NORMAL, 1 DOUBLE (TIME, Amendment 1). cadc: 0 CADENCE aims at the key's note, 1 (a Lands word tapped on the iOS page) at the chord's if it isn't there. */
+typedef struct { signed char c, l, form, breath, cad, fill, ans, stray, aoct, reg, sc, sl, dens, rng, var, tm, cadc; } mjam_set_t;
 mjam_set_t mjam_default(void);   /* ARP · UP, LOOP, breath None, CADENCE HOME, FILL REST, ECHO, LAST BEAT, 0, Middle, RUN · RUN-UP */
 
 const char *mjam_col_name(int c);          /* ARP OSTINATO HOOK LEAD RUN PEDAL */
@@ -35,11 +35,23 @@ const char *mjam_rng_name(int r);          /* NARROW AS DRAWN WIDE HUGE for -1..
 const char *mjam_var_name(int v);          /* OFF BAR 4 BARS 2+4 ALL BARS */
 const char *mjam_time_name(int t);         /* HALF NORMAL DOUBLE for -1..1 */
 
-typedef struct { int root, third, fifth; } mjam_chord_t;   /* pitch classes; -1 = none (the scale's note plays there) */
+/* pitch classes; -1 = none (the scale's note plays there). tone: its own scale from the root (TONE_R..TONE_7 less 1, theory.h), for a picked note; mjam_chord_of fills it */
+typedef struct { int root, third, fifth, tone[7]; } mjam_chord_t;
 typedef struct { int key, scale; const mjam_chord_t *chord[SEQ_STEPS]; } mjam_bar_in_t;   /* the chord under each step */
 /* bar[b] for b < bars; v[b] the bar's NEW BAR variation (v may be NULL: all 0). The model reads key and scale from here;
  * a bar's key and scale must equal them. */
-typedef struct { int key, scale, bars; mjam_set_t set; const mjam_bar_in_t *bar; const unsigned char *v; } mjam_loop_in_t;
+typedef struct { int key, scale, bars; mjam_set_t set; const mjam_bar_in_t *bar; const unsigned char *v; const unsigned char (*land)[SEQ_STEPS]; } mjam_loop_in_t;
+/* land (may be NULL): per bar and step, a pick where a chord starts, MJ_LAND_CODE(tone, oct), 0 none. The first note of that chord's span moves to the tone nearest it, plus
+ * the octave; its other notes move by the same scale steps, and any on a beat off the chord takes the beat rule. A Pedal block ignores picks. */
+#define MJ_LAND_CODE(tone, oct) ((tone) | ((oct) + 1) << 4)
+/* A step's pick (mjam_state_t.fix, above MJ_FIX_HOLD): a tone of the chord TONE_R..TONE_7, the half step below (MP_BELOW) or above (MP_ABOVE) the next chord's first note, or
+ * the half step under this chord's 3rd (MP_BLUE); an octave -1..1 around where the tune is */
+enum { MP_BELOW = 8, MP_ABOVE, MP_BLUE };
+#define MJ_PICK_BASE 130
+static inline int mjam_pick_code(int tone, int oct) { return MJ_PICK_BASE + (tone - 1) * 3 + oct + 1; }
+static inline int mjam_is_pick(int code) { return code >= MJ_PICK_BASE && code <= MJ_PICK_BASE + (MP_BLUE - 1) * 3 + 2; }
+static inline int mjam_pick_tone(int code) { return (code - MJ_PICK_BASE) / 3 + 1; }
+static inline int mjam_pick_oct(int code) { return (code - MJ_PICK_BASE) % 3 - 1; }
 /* note: MIDI, 0 = silent; hold 1 = a held step (continues the note before); tension 0..97 (a held step: its note's) */
 typedef struct { unsigned char note, hold, tension; } mjam_note_t;
 
@@ -61,7 +73,14 @@ void mjam_block_bar(const mjam_loop_in_t *in, int c, int l, int b, mjam_note_t o
  * (a fixed note's) */
 int mjam_tension(int key, int scale, const mjam_chord_t *ch, int note, int step);
 int mjam_frame(const mjam_note_t line[SEQ_STEPS], int i);   /* the dot frame 0..72: 0 rest, 1 + level * 5 + band, 61 + level */
+/* What a pick on the chord spanning steps from..to-1 of bar b would land on, and what plays there with none: out[0] as the tune (0: no note starts in the span), out[MJ_LAND_AT(tone, oct)]
+ * each tone by octave. It reads in->set for the fill; in->land is left out. */
+#define MJ_LAND_NOTES 22
+#define MJ_LAND_AT(tone, oct) (1 + ((tone) - 1) * 3 + (oct) + 1)
+int mjam_fold(int m);   /* a note folded into 36..100, as every line's */
+void mjam_land_notes(const mjam_loop_in_t *in, int b, const mjam_set_t *set, int from, int to, unsigned char out[MJ_LAND_NOTES]);
 int mjam_score(const mjam_note_t line[SEQ_STEPS]);          /* round half up (0.6 max + 0.4 mean) of the notes' tension; 0 if none */
+int mjam_gap_bar(const mjam_set_t *s, int b, int bars);   /* 1 when BREATH and FILL play on bar b: before each answer; in LOOP, at its phrase end */
 int mjam_role(int form, int pos, int *src_pos);   /* 'C' 'A' 'R' 'S' 'F' of phrase bar pos 0..3; src_pos: the bar it plays */
 /* 0.21 the metric strength of bar step p 0..15 (DENSITY's THIN, the JAM velocities): 4 the downbeat, 3 beat 3, 2 beats 2 and 4, 1 the
  * other 8ths, 0 the 16ths */

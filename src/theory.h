@@ -13,6 +13,7 @@ int theory_degree_pc(int key, int scale, int deg);   /* pitch class 0..11 of a s
  * tone 3 of degree 0 in E minor is G3 (55). */
 int theory_tone_note(int key, int scale, int deg, int tone, int octave);
 
+int theory_triad_quality(int key, int scale, int deg);                    /* 0 major, 1 minor, 2 diminished, 3 augmented */
 int theory_chord_name(int key, int scale, int deg, char *buf, int len);   /* "Em", "C", "F#dim"; returns the length */
 int theory_note_name(int note, char *buf, int len);                       /* "E4"; returns the length */
 
@@ -43,8 +44,16 @@ extern const char *const THEORY_COLOUR_NAME[COL_COUNT];   /* "Triad","7th","sus2
 /* The scale and degree of a project scale's borrowed chord b (1..3): the same degree from another scale. */
 int theory_borrow_scale(int scale, int b);
 int theory_borrow_degree(int scale, int b);
-/* The scale a slot's chord comes from: src 0 = the project scale, 1..3 = theory_borrow_scale(scale, src) */
+/* The scale a slot's chord comes from: src 0 = the project scale, 1..3 = theory_borrow_scale(scale, src), THEORY_SRC_CHROMA.. a
+ * chromatic chord's own scale (below) */
 int theory_slot_scale(int scale, int src);
+/* 0.28 a chromatic chord (Feel): a chord on any root, whatever the project's scale. Its src is THEORY_SRC_CHROMA + root x CQ_COUNT +
+ * quality, root the semitones above the key, its degree 0, of a seven-note scale that starts on that root, so every (key, scale, deg,
+ * colour) call reads it as any other chord and it moves with the key. Dominant has the flat 7th, diminished the double-flat 7th. */
+enum { CQ_MAJOR, CQ_MINOR, CQ_DOM, CQ_DIM, CQ_COUNT };
+#define THEORY_SRC_CHROMA 4
+#define THEORY_SRC_MAX (THEORY_SRC_CHROMA + 12 * CQ_COUNT - 1)
+int theory_chroma_src(int root, int quality);   /* root taken mod 12; quality CQ_* */
 /* The tone a lane plays for `tone` on a chord of colour c: sus2/sus4 turn tone 3 into 2/4; else tone */
 int theory_colour_tone(int colour, int tone);
 /* MIDI notes of the chord in root position, root in octave 3 (like theory_triad), ascending; returns the count (2..5).

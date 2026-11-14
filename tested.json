@@ -448,5 +448,29 @@
    "on the Force: CS Test 0-26-0 (kept for the owner's VST-52 check) and CS Test 0-27-0 (this test) - the 2-project limit"
   ],
   "result": "pass"
+ },
+ {
+  "version": "0.28.1",
+  "device": "Akai Force",
+  "firmware": "MPC OS 3.9.1",
+  "date": "2026-11-13",
+  "includes": "built on the open-mpc toolchain (chordseq/open-mpc: upstream 52c1fb0 + local commits), the 3.10.1 install route in tools/deploy.sh and the SDK zip; the wrapper changes are meant to leave the Force's screen and notes as in 0.28.0; MPC OS 3.10.1 itself not tested (owner deferred)",
+  "checks": [
+   "install: tools/deploy.sh of dist/Cadenza-0.28.1-mpc-armv7.zip over 0.27.0; the 3.10.1 check found no External Plugin Support in /usr/bin/MPC, so the Synths route ran (as on 3.9.1); installed .so matches the package (md5 4e13dd20...); filmstrip cache of earlier starts cleaned",
+   "fresh project CS Test 0-28-1 (CS Test 0-26-0 deleted first: the 2-project limit), saved to [User] Force Documents/Projects: Cadenza on Plugin 001 (replacing the template's Hype; listed under VST > Cadenza), 16-bar clip in scene 1; MIDI checked by capturing the Cadenza ALSA port (arecordmidi, 137:0)",
+   "a new instance opens on PLAY with GATE 100% and GLOBAL's MIDI channels 1 / 2 / 3 (the option-index answers read right: OPTION_ANSWER_INDEX)",
+   "playing at 128 BPM, 20 s capture: Chords on ch 1 every bar (1.875 s), Bass C G A F on ch 2, Melody eighths on ch 3",
+   "bar line on PLAY, 40 frames at about 35 ms (drmgrab burst): the bar tile and playhead switch first, the readout, chord name and lane tiles follow 2-3 frames (about 100 ms) later, then all agree (the 100 ms LIT hold)",
+   "tap CHORUS while playing: NEXT BAR: CHORUS shows in the first frames after the touch (refresh_display), and the Chorus takes over at the bar line",
+   "every tab opens while playing: PLAY, CHORDS JAM, BASS JAM, MELODY JAM, GLOBAL, CHORDS PHRASE",
+   "UNDO: a CHORDS JAM block tap (TECHNO DRONE 5TH) then UNDO on PLAY puts the part back to 'Tap a block to start'",
+   "PRESET drawer open while playing, 100 frames: one slide-in restart in about 2 bars (at most one redraw a bar); House 124 loads while playing with a quick tap (a 350 ms touch only highlights, as before) and plays on all three lanes",
+   "save: the project's plugin state decodes to csq2 (A minor, 8-bar part from House 124)",
+   "full Force restart (reboot over SSH), project reopened from the Browser: Cadenza opens with the House state; plays Am F C G through bars 5-8 once the template's 4-bar sequence loop is off (with it on, the part restarts at bar 5, as documented)",
+   "UI cost at 160 BPM (vst/ui_cost.json): CHORDS PHRASE 9.4%, PLAY 6.6%, MATRIX 5.5% of MPC's main thread -> +3.9 / +1.1 points (0.26.0: +2.9 / +1.1; budget 35); offline worst 71.0 screen updates/s (budget 80); tests/budget.sh BUDGET OK",
+   "soak 10 minutes, 30 s interval, PLAY page open, playing House 124 at 160 BPM with the 4-bar loop on: MPC RSS 647716 -> 647716 kB, filmstrips 238944 -> 238944 kB, main thread 6.6%, no log lines; Cadenza MIDI still flowing at the end (vst/soak.txt)",
+   "on the Force: CS Test 0-27-0 and CS Test 0-28-1 (this test) - the 2-project limit"
+  ],
+  "result": "pass"
  }
 ]

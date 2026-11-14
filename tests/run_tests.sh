@@ -39,6 +39,16 @@ docker run --rm -e SCREEN_BUDGET="$SCREEN_BUDGET" -v "$PWD":/w -v "$MPC_VST":/mv
   gcc -std=gnu11 $SAN -DSCREEN_BUDGET=$SCREEN_BUDGET -Ivst/build -I/mv/wrapper -Isrc -o build/test_plugin tests/test_plugin.c /mv/wrapper/vst2_wrap.c \
       src/engine.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/bassline.c src/melody2.c src/jamlib.c src/presets.c -lm -ldl -lpthread
   ./build/test_plugin
+  gcc -std=gnu11 -Wall -Wextra -Werror $SAN -Isrc -o build/test_feel tests/test_feel.c src/feel.c src/presets.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/jamlib.c src/bassline.c src/melody2.c -lm -lpthread
+  ./build/test_feel
+  gcc -std=gnu11 -Wall -Wextra -Werror $SAN -Isrc -o build/test_tweak tests/test_tweak.c src/feel.c src/presets.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/jamlib.c src/bassline.c src/melody2.c -lm -lpthread
+  ./build/test_tweak
+  gcc -std=gnu11 -Wall -Wextra -Werror $SAN -Isrc -o build/test_bass_feel tests/test_bass_feel.c src/feel.c src/presets.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/jamlib.c src/bassline.c src/melody2.c -lm -lpthread
+  ./build/test_bass_feel
+  gcc -std=gnu11 -Wall -Wextra -Werror $SAN -Isrc -o build/test_melody_feel tests/test_melody_feel.c src/feel.c src/presets.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/jamlib.c src/bassline.c src/melody2.c -lm -lpthread
+  ./build/test_melody_feel
+  gcc -std=gnu11 -Wall -Wextra -Werror $SAN -Isrc -o build/test_try_keep tests/test_try_keep.c src/feel.c src/presets.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/jamlib.c src/bassline.c src/melody2.c -lm -lpthread
+  ./build/test_try_keep
   gcc -std=gnu11 -Wall -Wextra -Werror $SAN -Isrc -o build/core_parity tests/core_parity.c src/seq_core.c src/theory.c src/gen.c src/melody.c src/voicing.c src/rhythm.c src/jamlib.c src/bassline.c src/melody2.c -lm -lpthread
   ./build/core_parity > build/core_parity_native.txt
   ./build/core_parity | cmp - build/core_parity_native.txt || { echo "run_tests: FAIL: the core parity trace differs between two runs" >&2; exit 1; }

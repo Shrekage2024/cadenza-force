@@ -1,4 +1,4 @@
-# Cadenza 0.27.1
+# Cadenza 0.28.1
 
 **A chord-driven generative MIDI sequencer for the Akai Force.** Cadenza is a native VST2 plugin that plays chords,
 a bass line and a melody into three of your Force tracks. Pick a key, tap a block, turn a knob: it writes the parts,
@@ -30,7 +30,7 @@ Called Chord Seq until 0.25.0. The plugin's ID (`ChSq`) kept the old name, so pr
 ## Screenshots
 
 Taken on an Akai Force (MPC OS 3.9.1) running Cadenza 0.26.0, playing the House 124 preset. The Force's pages are the
-same in 0.27.
+same in 0.28.
 
 | | |
 |---|---|
@@ -94,23 +94,31 @@ The manual has more screens: every editor, browser and picker.
 ## Requirements
 
 - An **Akai Force** (first generation), MPC OS 3.x. Cadenza is built for the Force's 32-bit ARM chip and tested on a
-  Force with MPC OS 3.9.1. The installer also runs on other first-generation MPC OS devices (MPC Live, Live II, One, X,
-  Key 61), but they are untested.
-- **Root SSH access** to the device, which needs a modded unit (for example MockbaMod). Stock MPC OS can't load
-  third-party plugins. Installing this way is unofficial: back up first, at your own risk.
+  Force with MPC OS 3.9.1; MPC OS 3.10.1 is not tested yet. It also installs on other first-generation MPC OS devices
+  (MPC Live, Live II, One, X, Key 37, Key 61), but they are untested.
+- **MPC OS 3.10.1 or later:** External Plugin Support turned on (Preferences › Enhancements). Akai's plugin support is
+  free and experimental, and Akai does not support third-party plugins.
+- **MPC OS 3.9.1 or earlier:** root SSH access to the device, which needs a modded unit (for example MockbaMod).
+  Installing this way is unofficial: back up first, at your own risk.
 - Instrument tracks for the three parts. Cadenza makes MIDI only, no sound.
 
 ---
 
 ## Install
 
-1. Download the release zip (`Cadenza-0.27.1-mpc-armv7.zip`) and unzip it on your computer.
+**MPC OS 3.10.1 or later:** download `Cadenza-0.28.1-mpc-sdk.zip`, unzip it, and copy the `Cadenza - VST - Cadenza`
+folder into a folder named `VST2 Plugins` at the top of an SD card or USB drive. Restart the Force; Cadenza is under
+**External VST Plugins › Cadenza**. To uninstall, delete the folder.
+
+**MPC OS 3.9.1 or earlier:**
+
+1. Download the release zip (`Cadenza-0.28.1-mpc-armv7.zip`) and unzip it on your computer.
 2. **Save your project.** The installer stops and restarts MPC.
 3. Copy the folder to the device and run the installer:
 
    ```
-   scp -r Cadenza-0.27.1 root@<device-ip>:/tmp/
-   ssh root@<device-ip> sh /tmp/Cadenza-0.27.1/install.sh
+   scp -r Cadenza-0.28.1 root@<device-ip>:/tmp/
+   ssh root@<device-ip> sh /tmp/Cadenza-0.28.1/install.sh
    ```
 
 The installer copies the plugin to `/sdcard/Synths/Cadenza - VST - Cadenza/`, backs up `MPC.settings`, adds Cadenza to
@@ -121,7 +129,7 @@ it. The zip's `INSTALL.md` also has the steps for installing by hand.
 
 ## Your first groove in 60 seconds
 
-1. **Load Cadenza:** make a plugin track, open MENU › TRACK EDIT, tap PLUGIN and pick **VST › Cadenza**.
+1. **Load Cadenza:** make a plugin track, open MENU › TRACK EDIT, tap PLUGIN and pick **VST › Cadenza** (on MPC OS 3.10.1, **External VST Plugins › Cadenza**).
 2. **Make three tracks to play:** pads, bass and a lead, with any sounds you like.
 3. **Wire them:** on each of the three, set **INPUT PORT** to **Cadenza MIDI Out** and **INPUT CHANNEL** to 1 (chords),
    2 (bass) or 3 (melody).
@@ -177,7 +185,7 @@ More in the [manual's troubleshooting chapter](MANUAL.md#21-troubleshooting).
 | Timing | 16 steps a bar, placed from MPC's song position; follows MPC's tempo |
 | Keys and scales | 12 keys; Major, Minor, Dorian, Mixolydian, Phrygian, Lydian, Harmonic minor |
 | Presets | Init and 6 genre presets in MPC's PRESET menu |
-| CPU | p99 40.5 % of one audio block, worst block 57.6 %, in the toolchain bench's worst-case knob sweep on the Force (0.27.0) |
+| CPU | p99 24.2 % of one audio block, worst block 65.5 %, in the toolchain bench's worst-case knob sweep on the Force (0.28.1); 4.7 % idle |
 | Plugin ID | `ChSq` |
 
 ---
@@ -191,11 +199,11 @@ More in the [manual's troubleshooting chapter](MANUAL.md#21-troubleshooting).
 
 ## Building and tests
 
-Builds run in Docker with the [mpc-vst-plugins](https://github.com/sd88me/mpc-vst-plugins) toolchain, checked out next
-to this repo (or set `MPC_VST` to its path). Use the branch `chordseq/on-no-update` of
-[Shrekage2024/mpc-vst-plugins](https://github.com/Shrekage2024/mpc-vst-plugins/tree/chordseq/on-no-update): it adds
-three wrapper options that `vst/vst.json` turns on. Without them the plugin still builds, but it asks MPC for a redraw
-about five times a second while playing.
+Builds run in Docker with the [mpc-vst-plugins](https://github.com/open-mpc/mpc-vst-plugins) toolchain, checked out next
+to this repo (or set `MPC_VST` to its path). Use the branch `chordseq/open-mpc` of
+[Shrekage2024/mpc-vst-plugins](https://github.com/Shrekage2024/mpc-vst-plugins/tree/chordseq/open-mpc): it adds
+five wrapper options that `vst/vst.json` turns on. Without them the plugin still builds, but it redraws MPC's screen
+more often while playing and reads some options back wrong (the MIDI channels, GATE).
 
 ```
 vst/build.sh          # cadenza.so, the skin and the plugin-list entry in vst/build/, then the size budget check
@@ -209,7 +217,7 @@ opens the MIDI port. `vst/make_skin.py` generates the skin.
 
 ## Credits and licence
 
-Cadenza is built with the MIT-licensed [mpc-vst-plugins](https://github.com/sd88me/mpc-vst-plugins) toolchain and
+Cadenza is built with the MIT-licensed [mpc-vst-plugins](https://github.com/open-mpc/mpc-vst-plugins) toolchain and
 VST2 wrapper by sd88me and contributors. Full credits and third-party licences are in [CREDITS.md](CREDITS.md).
 
 [PolyForm Shield 1.0.0](LICENSE): free to use, study, modify and share for any purpose except building a product that

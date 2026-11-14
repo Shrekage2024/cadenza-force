@@ -9076,7 +9076,7 @@ static void ref_bar(const seq_t *s, int b, const bass_set_t *set, unsigned char 
     for (int j = 0; j < 2; j++) {
         theory_chord_notes(s->key, s->scale, p->prog[(b + j) % p->bars], COL_TRIAD, n);
         int r = ((n[0] % 12) + 12) % 12, t = ((n[1] % 12) + 12) % 12;
-        ch[j] = (bass_chord_t){r, t, ((t - r) % 12 + 12) % 12 == 3};
+        ch[j] = (bass_chord_t){r, t, ((t - r) % 12 + 12) % 12 == 3, 0};
     }
     seq_bar_plays(s, LANE_BASS, b, c);
     bass_span_in_t in = {c, 16, &ch[0], &ch[1], &k, *set, p->lane[LANE_BASS].bar_var[b], &p->bass.fix[b * SEQ_STEPS]};
@@ -9442,7 +9442,7 @@ static void model_bar(const seq_t *s, int b, mjam_note_t out[SEQ_STEPS]) {
     static mharm_t h;
     const seq_part_t *p = &s->part[s->cur_part];
     mharm(s, &h);
-    mjam_loop_in_t in = {s->key, s->scale, p->bars, p->mjam.set, h.bar, p->lane[LANE_MEL_UP].bar_var};
+    mjam_loop_in_t in = {s->key, s->scale, p->bars, p->mjam.set, h.bar, p->lane[LANE_MEL_UP].bar_var, NULL};
     mjam_bar(&in, b, p->mjam.nlock >> b & 1 ? &p->mjam.frozen[b] : &p->mjam.set, out);
 }
 
@@ -9596,7 +9596,7 @@ static void test_20_short_loops(void) {
                     mel_rerender(&s);
                     mharm(&s, &h);
                     for (int b = 0; b < 4; b++) four[b] = h.bar[b % n];
-                    mjam_loop_in_t in = {s.key, s.scale, 4, m, four, NULL};
+                    mjam_loop_in_t in = {s.key, s.scale, 4, m, four, NULL, NULL};
                     for (int b = 0; b < n; b++) {
                         mjam_note_t want[SEQ_STEPS], got[SEQ_STEPS];
                         mjam_bar(&in, b, &m, want);
@@ -9769,7 +9769,7 @@ static void model_lines(const seq_t *s, int c, int l, mjam_note_t out[SEQ_LANE_S
     mjam_set_t m = p->mjam.set;
     m.c = (signed char)c, m.l = (signed char)l;
     mharm(s, &h);
-    mjam_loop_in_t in = {s->key, s->scale, p->bars, m, h.bar, p->lane[LANE_MEL_UP].bar_var};
+    mjam_loop_in_t in = {s->key, s->scale, p->bars, m, h.bar, p->lane[LANE_MEL_UP].bar_var, NULL};
     for (int b = 0; b < p->bars; b++) mjam_bar(&in, b, p->mjam.nlock >> b & 1 ? &p->mjam.frozen[b] : &m, &out[b * SEQ_STEPS]);
 }
 
@@ -11318,7 +11318,7 @@ static void test_20_save_round_trip(void) {
  * case with a fully edited Melody too */
 static void heavy_part(seq_t *s, int part, int edited, int mlocked, int mfixed) {
     unsigned char c[16], b[16];
-    mjam_set_t m = {MJ_RUN, 4, MF_SENT, 3, 2, 3, MA_SWAP, 3, 1, 0, MJ_PEDAL, 4, 2, 2, 3, 1};   /* 0.21: DENSITY, RANGE, VARIATION, TIME too */
+    mjam_set_t m = {MJ_RUN, 4, MF_SENT, 3, 2, 3, MA_SWAP, 3, 1, 0, MJ_PEDAL, 4, 2, 2, 3, 1, 0};   /* 0.21: DENSITY, RANGE, VARIATION, TIME too */
     rhythm_parse("AxgxAxgxAxgxAxgx", c);
     rhythm_parse("AgxgAgxgAgxgAgx-", b);
     seq_select_part(s, part);
@@ -11468,7 +11468,7 @@ static void test_20_bad_fields(void) {
     CHECK(seq_state_load(&t, st) && mel_default_lane(&t) && mel_is_model(&t), "3.jx=zz, 3.jl=99:!!, 3.jf=ffff: the JAM default");
     snprintf(st, sizeof st, "%s|A3.jx=zzzzzzzzzzzz|A3.jw=9|A3.jk=999,-5,40|A3.jl=1:zzzzzzzzzzzz;2:!!!!!!!!!!!!;x:1;3:;0:1234|A3.jf=0081zz0002800fffff7f014503820400|A4=0:", HEAD);
     seq_init(&t, emit, NULL);
-    mjam_set_t hi = {5, 4, 5, 3, 3, 3, 5, 3, 1, 2, 5, 4, 0, 0, 0, 0};
+    mjam_set_t hi = {5, 4, 5, 3, 3, 3, 5, 3, 1, 2, 5, 4, 0, 0, 0, 0, 0};
     int others = 1;
     for (int i = 3; i < SEQ_LANE_STEPS; i++) others &= !q->mjam.fix[i];
     CHECK(seq_state_load(&t, st) && !memcmp(&q->mjam.set, &hi, sizeof hi) && q->mjam.sw == 3 && q->mjam.push == 100 && q->mel.kn[MK_GATE] == 0 &&
